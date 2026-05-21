@@ -2,7 +2,7 @@
 Quiz Generator Agent — Study Coach
 ===================================
 Responsabilità: dato un exam_id, recupera chunk rilevanti da ChromaDB (RAG)
-e genera N domande a risposta aperta calibrate sul materiale dello studente.
+e genera N domande alla risposta aperta calibrate sul materiale dello studente.
 
 Prompt versionato: backend/agents/prompts/quiz_generator_v1.txt
 """
@@ -16,8 +16,7 @@ from dataclasses import dataclass, asdict
 import google.generativeai as genai
 from dotenv import load_dotenv
 
-from ingestor import retrieve_chunks  # aggiusta l'import se cambia la struttura
-
+from backend.agents.ingestor import retrieve_chunks
 load_dotenv()
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
@@ -116,7 +115,7 @@ def generate_quiz(
     model_name: str = DEFAULT_MODEL,
 ) -> QuizResult:
     """
-    Genera N domande a risposta aperta sul materiale indicizzato per exam_id.
+    Genera N domande ha risposta aperta sul materiale indicizzato per exam_id.
 
     Flusso:
         1. Recupero chunk rilevanti da ChromaDB (RAG)

@@ -4,7 +4,7 @@ Socratic Tutor Agent — Study Coach
 Responsabilità: gestire il loop di interrogazione socratica per una singola domanda.
 
 Loop per ogni domanda:
-    1. mostra domanda allo studente
+    1. Mostra domanda allo studente
     2. ricevi risposta_1
     3. genera domanda_guida socratica (NON dà la risposta)
     4. ricevi risposta_2
@@ -22,13 +22,14 @@ nel QuestionAttempt e poi serializzato nel qa_log della Session ORM.
 
 import json
 import re
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, asdict
 from enum import Enum, auto
 from pathlib import Path
+from typing import cast
 
 import google.generativeai as genai
 
-from ingestor import retrieve_chunks  # aggiusta al path definitivo del package
+from backend.agents.ingestor import retrieve_chunks
 
 # ---------------------------------------------------------------------------
 # Costanti e path dei prompt versionati
@@ -285,7 +286,7 @@ class SocraticTutor:
     def start(self, question_data: dict) -> str:
         """
         Inizializza il tutor con una domanda.
-        question_data deve avere: id, text, difficulty, topic_hint.
+        Question_data deve avere: id, text, difficulty, topic_hint.
         Ritorna il testo della domanda da mostrare allo studente.
         """
         self.attempt = QuestionAttempt(
@@ -302,7 +303,10 @@ class SocraticTutor:
             exam_id=self.exam_id,
             n_results=self.n_chunks,
         )
-        return self.attempt.question_text
+        attempt = self.attempt
+        if attempt is None:
+            raise RuntimeError("Tutor non inizializzato. Chiama start() prima.")
+        return attempt.question_text
 
     def submit_answer_1(self, answer: str) -> dict:
         """
@@ -317,26 +321,27 @@ class SocraticTutor:
             }
         """
         self._assert_state(TurnState.WAITING_ANSWER_1)
+        attempt = cast(QuestionAttempt, self.attempt)
 
-        self.attempt.student_answer_1 = answer.strip()
+        attempt.student_answer_1 = answer.strip()
 
         data = _generate_guiding_question(
-            self.attempt, self._context_cache, self.model_name
+            attempt, self._context_cache, self.model_name
         )
 
-        self.attempt.guiding_question = data["guiding_question"]
-        self.attempt.positive_feedback = data.get("positive_feedback", "")
-        self.attempt.focus_area = data.get("focus_area", "")
-        self.attempt.state = TurnState.WAITING_ANSWER_2
+        attempt.guiding_question = data["guiding_question"]
+        attempt.positive_feedback = data.get("positive_feedback", "")
+        attempt.focus_area = data.get("focus_area", "")
+        attempt.state = TurnState.WAITING_ANSWER_2
 
         print(
             f"[SocraticTutor] Domanda guida generata | "
-            f"q_id={self.attempt.question_id} | focus={self.attempt.focus_area}"
+            f"q_id={attempt.question_id} | focus={attempt.focus_area}"
         )
         return {
-            "guiding_question": self.attempt.guiding_question,
-            "positive_feedback": self.attempt.positive_feedback,
-            "focus_area": self.attempt.focus_area,
+            "guiding_question": attempt.guiding_question,
+            "positive_feedback": attempt.positive_feedback,
+            "focus_area": attempt.focus_area,
         }
 
     def submit_answer_2(self, answer: str) -> dict:
@@ -355,16 +360,17 @@ class SocraticTutor:
             }
         """
         self._assert_state(TurnState.WAITING_ANSWER_2)
+        attempt = cast(QuestionAttempt, self.attempt)
 
-        self.attempt.student_answer_2 = answer.strip()
+        attempt.student_answer_2 = answer.strip()
 
-        eval_result = _evaluate(self.attempt, self._context_cache, self.model_name)
-        self.attempt.evaluation = eval_result
-        self.attempt.state = TurnState.EVALUATED
+        eval_result = _evaluate(attempt, self._context_cache, self.model_name)
+        attempt.evaluation = eval_result
+        attempt.state = TurnState.EVALUATED
 
         print(
             f"[SocraticTutor] Valutazione: {eval_result.score}/10 | "
-            f"q_id={self.attempt.question_id}"
+            f"q_id={attempt.question_id}"
         )
         return {
             "score": eval_result.score,
@@ -392,19 +398,24 @@ class SocraticTutor:
             }
         """
         self._assert_state(TurnState.EVALUATED)
+        attempt = cast(QuestionAttempt, self.attempt)
 
-        self.attempt.contestation_text = argumentation.strip()
+        attempt.contestation_text = argumentation.strip()
 
         contest_result = _re_evaluate_after_contestation(
-            self.attempt, self._context_cache, self.model_name
+            attempt, self._context_cache, self.model_name
         )
-        self.attempt.contestation_result = contest_result
-        self.attempt.state = TurnState.CONTESTED
+        attempt.contestation_result = contest_result
+        attempt.state = TurnState.CONTESTED
+
+        evaluation = attempt.evaluation
+        if evaluation is None:
+            raise RuntimeError("Valutazione mancante: impossibile mostrare il voto originale.")
 
         print(
             f"[SocraticTutor] Contestazione: {contest_result.contestation_assessment} | "
-            f"voto {self.attempt.evaluation.score} → {contest_result.final_score} | "
-            f"q_id={self.attempt.question_id}"
+            f"voto {evaluation.score} → {contest_result.final_score} | "
+            f"q_id={attempt.question_id}"
         )
         return {
             "final_score": contest_result.final_score,
@@ -422,13 +433,14 @@ class SocraticTutor:
         """
         if self.attempt is None:
             raise RuntimeError("Tutor non inizializzato. Chiama start() prima.")
-        if self.attempt.state not in (TurnState.EVALUATED, TurnState.CONTESTED):
+        attempt = self.attempt
+        if attempt.state not in (TurnState.EVALUATED, TurnState.CONTESTED):
             raise RuntimeError(
-                f"Non si può chiudere in stato {self.attempt.state}. "
+                f"Non si può chiudere in stato {attempt.state}. "
                 "Lo studente deve aver risposto almeno due volte."
             )
-        self.attempt.state = TurnState.CLOSED
-        return self.attempt
+        attempt.state = TurnState.CLOSED
+        return attempt
 
     # ------------------------------------------------------------------
     # Serializzazione — per qa_log della Session

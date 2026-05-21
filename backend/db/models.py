@@ -8,6 +8,15 @@ def now_utc():
     return datetime.now(timezone.utc)
 
 class Student(Base):
+    """Rappresenta uno studente registrato nel sistema Study Coach.
+
+    Attributi:
+        id: Identificativo univoco dello studente.
+        username: Nome utente univoco.
+        password_hash: Hash della password memorizzata in modo sicuro.
+        created_at: Data e ora di creazione del record.
+        exams: Collezione degli esami associati allo studente.
+    """
     __tablename__ = "students"
     id            = Column(Integer, primary_key=True)
     username      = Column(String(50), unique=True, nullable=False)
@@ -16,6 +25,16 @@ class Student(Base):
     exams         = relationship("Exam", back_populates="student", cascade="all, delete")
 
 class Exam(Base):
+    """Rappresenta un esame associato a uno studente.
+
+    Attributi:
+        id: Identificativo univoco dell'esame.
+        student_id: Chiave esterna verso lo studente proprietario.
+        name: Nome dell'esame.
+        created_at: Data e ora di creazione del record.
+        student: Riferimento allo studente associato.
+        sessions: Collezione delle sessioni di studio legate all'esame.
+    """
     __tablename__ = "exams"
     id         = Column(Integer, primary_key=True)
     student_id = Column(Integer, ForeignKey("students.id"), nullable=False)
@@ -25,6 +44,18 @@ class Exam(Base):
     sessions   = relationship("Session", back_populates="exam", cascade="all, delete")
 
 class Session(Base):
+    """Rappresenta una sessione di studio o interrogazione per un esame.
+
+    Attributi:
+        id: Identificativo univoco della sessione.
+        exam_id: Chiave esterna verso l'esame associato.
+        started_at: Data e ora di inizio sessione.
+        ended_at: Data e ora di fine sessione, se presente.
+        score_total: Punteggio complessivo ottenuto nella sessione.
+        qa_log: Log JSON serializzato delle domande e risposte.
+        report_path: Percorso del report generato per la sessione.
+        exam: Riferimento all'esame associato.
+    """
     __tablename__ = "sessions"
     id          = Column(Integer, primary_key=True)
     exam_id     = Column(Integer, ForeignKey("exams.id"), nullable=False)

@@ -1,0 +1,39 @@
+Sei un valutatore universitario imparziale. Uno studente ha contestato
+la valutazione ricevuta. Riesamina con obiettività.
+
+---
+
+DOMANDA:
+{question}
+
+PRIMA RISPOSTA:
+{student_answer_1}
+
+DOMANDA GUIDA:
+{guiding_question}
+
+SECONDA RISPOSTA:
+{student_answer_2}
+
+VOTO ORIGINALE: {original_score}/10
+MOTIVAZIONE ORIGINALE: {original_motivation}
+
+CONTESTAZIONE DELLO STUDENTE:
+{contestation}
+
+MATERIALE DI RIFERIMENTO:
+{context_chunks}
+
+Valuta se la contestazione è fondata basandoti SOLO sul materiale di riferimento.
+Puoi confermare, aumentare o diminuire il voto.
+
+Rispondi SOLO con un JSON valido, senza markdown:
+{{
+  "final_score": 7,
+  "contestation_assessment": "valido",
+  "final_motivation": "spiegazione del voto finale",
+  "response_to_student": "messaggio diretto allo studente che spiega la decisione"
+}}
+
+Il campo "contestation_assessment" deve essere uno tra:
+"valido", "parzialmente_valido", "non_valido"

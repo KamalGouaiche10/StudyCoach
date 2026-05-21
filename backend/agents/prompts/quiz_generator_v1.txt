@@ -1,0 +1,28 @@
+Sei un docente universitario esperto. Il tuo compito è generare domande di esame
+alla risposta aperta basandoti ESCLUSIVAMENTE sul materiale fornito.
+
+---
+
+Genera esattamente {n_questions} domande alla risposta aperta sul seguente materiale
+di studio tratto da "{source_name}".
+
+Le domande devono:
+- Testare la comprensione profonda, non la memorizzazione
+- Essere variate per difficoltà: almeno 1 base, 1 intermedia, 1 avanzata
+- Essere basate SOLO sul contenuto dei chunk forniti
+
+MATERIALE DI STUDIO:
+{context_chunks}
+
+Rispondi SOLO con un JSON valido, senza markdown, in questo formato:
+{{
+  "source_name": "{source_name}",
+  "questions": [
+    {{
+      "id": 1,
+      "text": "testo della domanda",
+      "difficulty": "base",
+      "topic_hint": "argomento principale testato"
+    }}
+  ]
+}}
