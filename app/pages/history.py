@@ -6,7 +6,6 @@ import streamlit as st
 import json
 import sys
 from pathlib import Path
-from datetime import datetime, timezone
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
@@ -40,6 +39,19 @@ def _get_sessions(exam_id: int) -> list:
             .order_by(DbSession.started_at.desc())
             .all()
         )
+    finally:
+        db.close()
+
+
+def _delete_session(session_id: int):
+    db = SessionLocal()
+    try:
+        sess = db.query(DbSession).filter(DbSession.id == session_id).first()
+        if sess:
+            db.delete(sess)
+            db.commit()
+    except Exception:
+        db.rollback()
     finally:
         db.close()
 
@@ -85,7 +97,7 @@ def _navbar():
               -webkit-background-clip:text; -webkit-text-fill-color:transparent;">
             🎓 Study Coach
         </span>
-        <span style="color:#252a36; margin:0 0.5rem">›</span>
+        <span style="color:#6b7280; margin:0 0.5rem">›</span>
         <span style="font-family:'Syne',sans-serif; font-size:1.1rem; font-weight:700; color:#e8eaf0;">
             Storico sessioni
         </span>
@@ -100,48 +112,62 @@ def _navbar():
 
 # ── Render sessione espansa ────────────────────────────────────────────────
 
+def _is_valid_attempt(attempt: dict) -> bool:
+    """Controlla che il dict abbia i campi minimi attesi (formato piatto)."""
+    return isinstance(attempt, dict) and "question_text" in attempt
+
+
 def _render_session_detail(sess: DbSession):
-    """Mostra il dettaglio di una sessione con Q&A log."""
     if not sess.qa_log:
         st.info("Nessun log disponibile per questa sessione.")
         return
-
     try:
         attempts = json.loads(sess.qa_log)
     except Exception:
         st.warning("Impossibile caricare il log della sessione.")
         return
 
-    for i, attempt in enumerate(attempts, 1):
-        q_text = attempt.get("question_text", attempt.get("question", {}).get("text", f"Domanda {i}"))
-        score  = attempt.get("final_score", attempt.get("evaluation", {}).get("score", "—"))
-        diff   = attempt.get("difficulty", attempt.get("question", {}).get("difficulty", ""))
-        topic  = attempt.get("topic_hint", attempt.get("question", {}).get("topic_hint", ""))
+    if not attempts:
+        st.info("Sessione senza domande registrate.")
+        return
 
-        diff_css = {"base": "badge-base", "intermedia": "badge-inter", "avanzata": "badge-avanzata"}.get(diff, "badge-inter")
+    # Filtra solo attempt nel formato corretto
+    valid = [a for a in attempts if _is_valid_attempt(a)]
+    if not valid:
+        st.info("Il log di questa sessione è in un formato precedente non visualizzabile.")
+        return
+
+    for i, attempt in enumerate(valid, 1):
+        q_text      = attempt.get("question_text", f"Domanda {i}")
+        score       = attempt.get("final_score", "—")
+        diff        = attempt.get("difficulty", "")
+        topic       = attempt.get("topic_hint", "")
+        diff_css    = {"base": "badge-base", "intermedia": "badge-inter", "avanzata": "badge-avanzata"}.get(diff, "badge-inter")
+        badge_html  = f'<span class="badge {diff_css}">{diff}</span>' if diff else ""
+        topic_html  = f'<div style="color:#6b7280; font-size:0.78rem;">🏷 {topic}</div>' if topic else ""
+        score_color = _score_color(score) if isinstance(score, (int, float)) else "#6b7280"
 
         st.markdown(f"""
         <div class="sc-card" style="margin-bottom:0.5rem;">
             <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:0.6rem;">
                 <div style="display:flex; align-items:center; gap:0.5rem;">
                     <span style="color:#6b7280; font-size:0.8rem; font-weight:600;">Q{i}</span>
-                    {f'<span class="badge {diff_css}">{diff}</span>' if diff else ''}
+                    {badge_html}
                 </div>
-                <span style="font-family:\'Syne\',sans-serif; font-weight:800; font-size:1.1rem;
-                      color:{_score_color(score) if isinstance(score, (int,float)) else '#6b7280'}">
+                <span style="font-family:'Syne',sans-serif; font-weight:800; font-size:1.1rem; color:{score_color};">
                     {score}/10
                 </span>
             </div>
             <p style="margin:0 0 0.5rem; font-weight:600; font-size:0.92rem;">{q_text}</p>
-            {f'<div style="color:#6b7280; font-size:0.78rem;">🏷 {topic}</div>' if topic else ''}
+            {topic_html}
         </div>
         """, unsafe_allow_html=True)
 
-        # Risposte collassabili
-        ans1 = attempt.get("student_answer_1", "")
-        ans2 = attempt.get("student_answer_2", "")
-        guiding = attempt.get("guiding_question", "")
-        motivation = attempt.get("evaluation", {}).get("motivation", "") if isinstance(attempt.get("evaluation"), dict) else ""
+        ans1       = attempt.get("student_answer_1", "")
+        ans2       = attempt.get("student_answer_2", "")
+        guiding    = attempt.get("guiding_question", "")
+        evaluation = attempt.get("evaluation", {})
+        motivation = evaluation.get("motivation", "") if isinstance(evaluation, dict) else ""
 
         with st.expander(f"Dettaglio domanda {i}", expanded=False):
             if ans1:
@@ -153,18 +179,18 @@ def _render_session_detail(sess: DbSession):
             if motivation:
                 st.markdown(f"**Motivazione voto:** {motivation}")
 
-            # Contestazione
             contest = attempt.get("contestation_result")
             if contest and isinstance(contest, dict):
-                assessment = contest.get("contestation_assessment", "")
+                assessment  = contest.get("contestation_assessment", "")
                 final_score = contest.get("final_score", "")
-                resp = contest.get("response_to_student", "")
-                color_map = {"valido": "#10b981", "parzialmente_valido": "#f59e0b", "non_valido": "#f43f5e"}
-                c = color_map.get(assessment, "#6b7280")
+                resp        = contest.get("response_to_student", "")
+                color_map   = {"valido": "#10b981", "parzialmente_valido": "#f59e0b", "non_valido": "#f43f5e"}
+                c           = color_map.get(assessment, "#6b7280")
+                label       = assessment.replace("_", " ")
                 st.markdown(f"""
-                <div style="padding:0.5rem 0.8rem; background:#1a1a2e; border-radius:8px; margin-top:0.5rem;
-                            border-left:3px solid {c}; font-size:0.85rem;">
-                    ⚖️ <strong>Contestazione {assessment.replace('_',' ')}</strong>
+                <div style="padding:0.5rem 0.8rem; background:#1a1a2e; border-radius:8px;
+                            margin-top:0.5rem; border-left:3px solid {c}; font-size:0.85rem;">
+                    ⚖️ <strong>Contestazione {label}</strong>
                     &nbsp;→&nbsp; voto finale: <strong>{final_score}/10</strong><br/>
                     <span style="color:#9ca3af">{resp}</span>
                 </div>
@@ -179,8 +205,7 @@ def render():
 
     student_id   = st.session_state.student_id
     current_exam = st.session_state.get("current_exam")
-
-    exams = _get_all_exams(student_id)
+    exams        = _get_all_exams(student_id)
 
     if not exams:
         st.markdown("""
@@ -191,7 +216,6 @@ def render():
         """, unsafe_allow_html=True)
         return
 
-    # Selettore esame
     exam_options = {f"{e.name} (id {e.id})": e for e in exams}
     default_key  = None
     if current_exam:
@@ -200,13 +224,12 @@ def render():
                 default_key = k
                 break
 
-    keys = list(exam_options.keys())
+    keys        = list(exam_options.keys())
     default_idx = keys.index(default_key) if default_key else 0
 
     selected_key  = st.selectbox("Seleziona esame", keys, index=default_idx, label_visibility="collapsed")
     selected_exam = exam_options[selected_key]
-
-    sessions = _get_sessions(selected_exam.id)
+    sessions      = _get_sessions(selected_exam.id)
 
     st.markdown(f"""
     <div style="display:flex; align-items:center; gap:1rem; margin:1rem 0 0.75rem;">
@@ -225,26 +248,18 @@ def render():
         col_start, _ = st.columns([1, 3])
         with col_start:
             if st.button("▶ Avvia prima sessione", type="primary", use_container_width=True):
-                st.session_state.current_exam  = {"id": selected_exam.id, "name": selected_exam.name}
-                st.session_state.current_page  = "session"
-                st.session_state.quiz_result   = None
-                st.session_state.adaptive_engine = None
-                st.session_state.tutor         = None
-                st.session_state.current_q_idx = 0
-                st.session_state.tutor_state   = "idle"
-                st.session_state.current_session = None
-                st.rerun()
+                _go_to_session(selected_exam)
         return
 
     # ── Statistiche aggregate ──────────────────────────────────────────────
     completed = [s for s in sessions if s.score_total is not None]
     if completed:
-        avg_all  = round(sum(s.score_total for s in completed) / len(completed), 1)
-        best     = max(s.score_total for s in completed)
+        avg_all = round(sum(s.score_total for s in completed) / len(completed), 1)
+        best    = max(s.score_total for s in completed)
         col1, col2, col3, col4 = st.columns(4)
         metrics = [
-            ("Sessioni totali", len(sessions), "#6b7280"),
-            ("Completate",      len(completed), "#6c63ff"),
+            ("Sessioni totali", len(sessions),   "#6b7280"),
+            ("Completate",      len(completed),  "#6c63ff"),
             ("Media generale",  f"{avg_all}/10", _score_color(avg_all)),
             ("Miglior voto",    f"{best}/10",    _score_color(best)),
         ]
@@ -276,9 +291,12 @@ def render():
             score_str    = "In corso"
             score_color  = "#6b7280"
 
+        border_color = score_color if has_score else "#252a36"
+        report_label = "📄 Report disponibile" if (sess.report_path and Path(sess.report_path).exists()) else ""
+
         with st.container():
             st.markdown(f"""
-            <div class="sc-card" style="border-left:3px solid {score_color if has_score else '#252a36'};">
+            <div class="sc-card" style="border-left:3px solid {border_color};">
                 <div style="display:flex; justify-content:space-between; align-items:center;">
                     <div>
                         <div style="font-size:0.78rem; color:#6b7280; margin-bottom:0.3rem;">
@@ -290,13 +308,13 @@ def render():
                         </div>
                     </div>
                     <div style="text-align:right; font-size:0.82rem; color:#6b7280;">
-                        {f'Report disponibile' if sess.report_path and Path(sess.report_path).exists() else ''}
+                        {report_label}
                     </div>
                 </div>
             </div>
             """, unsafe_allow_html=True)
 
-            col_detail, col_pdf, col_spacer = st.columns([2, 1.5, 3])
+            col_detail, col_pdf, col_del = st.columns([2, 1.5, 1])
 
             with col_detail:
                 if sess.qa_log:
@@ -315,6 +333,14 @@ def render():
                             use_container_width=True,
                         )
 
+            with col_del:
+                # Permette di eliminare sessioni "In corso" o corrotte
+                if not has_score:
+                    if st.button("🗑 Elimina", key=f"del_sess_{sess.id}", use_container_width=True,
+                                 help="Elimina sessione incompleta"):
+                        _delete_session(sess.id)
+                        st.rerun()
+
             st.markdown("<div style='height:0.1rem'></div>", unsafe_allow_html=True)
 
     # ── Bottone nuova sessione ─────────────────────────────────────────────
@@ -322,12 +348,16 @@ def render():
     col_btn, _ = st.columns([1, 3])
     with col_btn:
         if st.button("▶ Nuova sessione", type="primary", use_container_width=True):
-            st.session_state.current_exam    = {"id": selected_exam.id, "name": selected_exam.name}
-            st.session_state.current_page    = "session"
-            st.session_state.quiz_result     = None
-            st.session_state.adaptive_engine = None
-            st.session_state.tutor           = None
-            st.session_state.current_q_idx   = 0
-            st.session_state.tutor_state     = "idle"
-            st.session_state.current_session = None
-            st.rerun()
+            _go_to_session(selected_exam)
+
+
+def _go_to_session(exam):
+    st.session_state.current_exam    = {"id": exam.id, "name": exam.name}
+    st.session_state.current_page    = "session"
+    st.session_state.quiz_result     = None
+    st.session_state.adaptive_engine = None
+    st.session_state.tutor           = None
+    st.session_state.current_q_idx   = 0
+    st.session_state.tutor_state     = "idle"
+    st.session_state.current_session = None
+    st.rerun()

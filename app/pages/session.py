@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from backend.db.models import SessionLocal, Session as DbSession
-from backend.agents.quiz_generator import generate_quiz, quiz_to_dict
+from backend.agents.quiz_generator import generate_quiz
 from backend.agents.socratic_tutor import SocraticTutor
 from backend.agents.adaptive_engine import AdaptiveEngine
 from backend.agents.report_generator import save_report
@@ -30,6 +30,60 @@ def _require_exam():
     if not st.session_state.get("current_exam"):
         st.session_state.current_page = "upload"
         st.rerun()
+
+
+# ── Serializzazione attempt in formato piatto per history.py ───────────────
+
+def _attempt_to_log_entry(tutor: SocraticTutor, final_score: int) -> dict:
+    """
+    Converte un QuestionAttempt nel formato piatto che history.py si aspetta:
+      - question_text, difficulty, topic_hint  → chiavi dirette
+      - student_answer_1, guiding_question, student_answer_2 → chiavi dirette
+      - final_score → int
+      - evaluation → dict con 'score', 'motivation'
+      - contestation_result → dict o None
+    """
+    attempt = tutor.attempt
+    if attempt is None:
+        return {}
+
+    entry: dict = {
+        "question_id":      attempt.question_id,
+        "question_text":    attempt.question_text,
+        "difficulty":       attempt.difficulty,
+        "topic_hint":       attempt.topic_hint,
+        "student_answer_1": attempt.student_answer_1,
+        "guiding_question": attempt.guiding_question,
+        "positive_feedback": attempt.positive_feedback,
+        "focus_area":       attempt.focus_area,
+        "student_answer_2": attempt.student_answer_2,
+        "final_score":      final_score,
+    }
+
+    if attempt.evaluation:
+        entry["evaluation"] = {
+            "score":                      attempt.evaluation.score,
+            "motivation":                 attempt.evaluation.motivation,
+            "correct_points":             attempt.evaluation.correct_points,
+            "missing_points":             attempt.evaluation.missing_points,
+            "improvement_after_guidance": attempt.evaluation.improvement_after_guidance,
+        }
+    else:
+        entry["evaluation"] = {}
+
+    if attempt.contestation_result:
+        entry["contestation_result"] = {
+            "final_score":              attempt.contestation_result.final_score,
+            "score_changed":            attempt.contestation_result.score_changed,
+            "score_delta":              attempt.contestation_result.score_delta,
+            "contestation_assessment":  attempt.contestation_result.contestation_assessment,
+            "final_motivation":         attempt.contestation_result.final_motivation,
+            "response_to_student":      attempt.contestation_result.response_to_student,
+        }
+    else:
+        entry["contestation_result"] = None
+
+    return entry
 
 
 # ── Navbar ─────────────────────────────────────────────────────────────────
@@ -55,12 +109,11 @@ def _navbar():
     st.markdown("<hr style='border-color:#252a36; margin:0.5rem 0 1rem'>", unsafe_allow_html=True)
 
 
-# ── Barra progresso sessione ───────────────────────────────────────────────
+# ── Barra progresso ────────────────────────────────────────────────────────
 
 def _progress_bar(current: int, total: int, scores: list):
     pct = int(current / total * 100) if total else 0
     avg = round(sum(scores) / len(scores), 1) if scores else 0
-
     col1, col2, col3 = st.columns([3, 1, 1])
     with col1:
         st.progress(pct)
@@ -73,10 +126,8 @@ def _progress_bar(current: int, total: int, scores: list):
                     f"Media: {avg if scores else '—'}</div>", unsafe_allow_html=True)
 
 
-# ── Score badge ────────────────────────────────────────────────────────────
-
 def _score_badge(score: int) -> str:
-    css = "score-high" if score >= 8 else ("score-mid" if score >= 6 else "score-low")
+    css  = "score-high" if score >= 8 else ("score-mid" if score >= 6 else "score-low")
     icon = "🟢" if score >= 8 else ("🟡" if score >= 6 else "🔴")
     return f"<span class='{css}'>{icon} {score}/10</span>"
 
@@ -86,27 +137,7 @@ def _diff_badge(diff: str) -> str:
     return f"<span class='badge {cls}'>{diff}</span>"
 
 
-# ── Salvataggio sessione nel DB ─────────────────────────────────────────────
-
-def _save_session(session_id: int, attempts: list, engine: AdaptiveEngine, exam: dict):
-    db = SessionLocal()
-    try:
-        sess = db.query(DbSession).filter(DbSession.id == session_id).first()
-        if not sess:
-            return
-        report = engine.generate_session_report()
-        sess.ended_at    = datetime.now(timezone.utc)
-        sess.score_total = report["overall_avg"]
-        sess.qa_log      = json.dumps([a if isinstance(a, dict) else a for a in attempts], ensure_ascii=False)
-        paths = save_report(report, session_id, exam["name"])
-        sess.report_path = paths.get("pdf", "")
-        db.commit()
-    except Exception as e:
-        db.rollback()
-        st.warning(f"Errore salvataggio sessione: {e}")
-    finally:
-        db.close()
-
+# ── DB helpers ─────────────────────────────────────────────────────────────
 
 def _create_db_session(exam_id: int) -> int:
     db = SessionLocal()
@@ -120,7 +151,27 @@ def _create_db_session(exam_id: int) -> int:
         db.close()
 
 
-# ── FASE 1: Generazione quiz ────────────────────────────────────────────────
+def _save_session(session_id: int, attempts: list, engine: AdaptiveEngine, exam: dict):
+    db = SessionLocal()
+    try:
+        sess = db.query(DbSession).filter(DbSession.id == session_id).first()
+        if not sess:
+            return
+        report = engine.generate_session_report()
+        sess.ended_at    = datetime.now(timezone.utc)
+        sess.score_total = report["overall_avg"]
+        sess.qa_log      = json.dumps(attempts, ensure_ascii=False)
+        paths = save_report(report, session_id, exam["name"])
+        sess.report_path = paths.get("pdf", "")
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        st.warning(f"Errore salvataggio sessione: {e}")
+    finally:
+        db.close()
+
+
+# ── FASE 1: Generazione quiz ───────────────────────────────────────────────
 
 def _render_quiz_generation():
     exam = st.session_state.current_exam
@@ -150,15 +201,11 @@ def _render_quiz_generation():
                         n_questions=n_q,
                         source_name=exam["name"],
                     )
-                    engine = AdaptiveEngine(
-                        student_id=st.session_state.student_id,
-                        exam_id=exam["id"],
-                    )
+                    engine     = AdaptiveEngine(student_id=st.session_state.student_id, exam_id=exam["id"])
                     session_id = _create_db_session(exam["id"])
 
                     questions_dicts = [
-                        {"id": q.id, "text": q.text,
-                         "difficulty": q.difficulty, "topic_hint": q.topic_hint}
+                        {"id": q.id, "text": q.text, "difficulty": q.difficulty, "topic_hint": q.topic_hint}
                         for q in quiz.questions
                     ]
 
@@ -168,11 +215,11 @@ def _render_quiz_generation():
                         "id":        session_id,
                         "questions": questions_dicts,
                         "remaining": questions_dicts.copy(),
-                        "attempts":  [],
+                        "attempts":  [],   # lista di dict piatti (formato history.py)
                         "scores":    [],
                     }
-                    st.session_state.tutor         = None
-                    st.session_state.tutor_state   = "idle"
+                    st.session_state.tutor       = None
+                    st.session_state.tutor_state = "idle"
                     st.session_state.current_q_idx = 0
                     st.rerun()
                 except ValueError as e:
@@ -182,14 +229,14 @@ def _render_quiz_generation():
                     st.error(f"Errore inatteso: {e}")
 
 
-# ── FASE 2: Loop socratico ──────────────────────────────────────────────────
+# ── FASE 2: Loop socratico ─────────────────────────────────────────────────
 
 def _render_active_session():
-    sess    = st.session_state.current_session
-    engine  = st.session_state.adaptive_engine
-    exam    = st.session_state.current_exam
-    state   = st.session_state.tutor_state
-    tutor   = st.session_state.tutor
+    sess   = st.session_state.current_session
+    engine = st.session_state.adaptive_engine
+    exam   = st.session_state.current_exam
+    state  = st.session_state.tutor_state
+    tutor  = st.session_state.tutor
 
     total_q = len(sess["questions"])
     done_q  = len(sess["attempts"])
@@ -197,23 +244,19 @@ def _render_active_session():
 
     _progress_bar(done_q, total_q, scores)
 
-    # ── Sessione completata ────────────────────────────────────────────────
+    # Sessione completata
     if not sess["remaining"] and state in ("idle", "closed"):
         _render_session_complete()
         return
 
-    # ── Scegli prossima domanda ────────────────────────────────────────────
+    # Scegli prossima domanda
     if state == "idle":
         next_q = engine.pick_next_question(sess["remaining"])
         if not next_q:
             _render_session_complete()
             return
 
-        # Inizializza tutor per questa domanda
-        new_tutor = SocraticTutor(
-            student_id=st.session_state.student_id,
-            exam_id=exam["id"],
-        )
+        new_tutor = SocraticTutor(student_id=st.session_state.student_id, exam_id=exam["id"])
         new_tutor.start(next_q)
         st.session_state.tutor       = new_tutor
         st.session_state.tutor_state = "answer1"
@@ -221,9 +264,8 @@ def _render_active_session():
         st.rerun()
 
     current_q = st.session_state.get("_current_q", {})
+    q_num     = done_q + 1
 
-    # ── Header domanda ─────────────────────────────────────────────────────
-    q_num = done_q + 1
     st.markdown(f"""
     <div class="sc-card" style="border-left:3px solid #6c63ff; margin-bottom:1.25rem;">
         <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:0.5rem;">
@@ -241,10 +283,10 @@ def _render_active_session():
     </div>
     """, unsafe_allow_html=True)
 
-    # ── STATO: Prima risposta ─────────────────────────────────────────────
+    # ── Prima risposta ─────────────────────────────────────────────────────
     if state == "answer1":
         st.markdown("**📝 La tua prima risposta:**")
-        ans1 = st.text_area("Rispondi alla domanda", key="input_ans1", height=130,
+        ans1 = st.text_area("Rispondi", key="input_ans1", height=130,
                              placeholder="Scrivi qui la tua risposta...", label_visibility="collapsed")
         if st.button("Invia risposta →", type="primary", key="btn_ans1"):
             if not ans1.strip():
@@ -256,21 +298,20 @@ def _render_active_session():
                 st.session_state.tutor_state = "answer2"
                 st.rerun()
 
-    # ── STATO: Seconda risposta (con domanda guida) ───────────────────────
+    # ── Seconda risposta ───────────────────────────────────────────────────
     elif state == "answer2":
         guide = st.session_state.get("_guide_result", {})
 
-        # Mostra risposta 1
+        ans1_text = st.session_state.tutor.attempt.student_answer_1
         st.markdown(f"""
         <div class="sc-card" style="background:#0f1319; margin-bottom:0.75rem;">
             <div style="font-size:0.78rem; color:#6b7280; margin-bottom:0.3rem; text-transform:uppercase; letter-spacing:0.05em;">
                 La tua prima risposta
             </div>
-            <p style="margin:0; color:#9ca3af; font-size:0.9rem;">{st.session_state.tutor.attempt.student_answer_1}</p>
+            <p style="margin:0; color:#9ca3af; font-size:0.9rem;">{ans1_text}</p>
         </div>
         """, unsafe_allow_html=True)
 
-        # Domanda guida socratica
         if guide.get("positive_feedback"):
             st.markdown(f"""
             <div style="padding:0.6rem 0.9rem; background:#1a1f2e; border-radius:8px; margin-bottom:0.5rem;
@@ -279,6 +320,7 @@ def _render_active_session():
             </div>
             """, unsafe_allow_html=True)
 
+        focus_html = f'<div style="margin-top:0.5rem; font-size:0.78rem; color:#6b7280;">Focus: {guide["focus_area"]}</div>' if guide.get("focus_area") else ""
         st.markdown(f"""
         <div style="padding:0.9rem 1rem; background:#1a1a2e; border-radius:10px; margin-bottom:1rem;
                     border-left:3px solid #6c63ff;">
@@ -287,13 +329,13 @@ def _render_active_session():
             <p style="margin:0; font-family:'Syne',sans-serif; font-weight:600; font-size:1rem; line-height:1.5;">
                 {guide.get('guiding_question', '')}
             </p>
-            {f'<div style="margin-top:0.5rem; font-size:0.78rem; color:#6b7280;">Focus: {guide["focus_area"]}</div>' if guide.get("focus_area") else ''}
+            {focus_html}
         </div>
         """, unsafe_allow_html=True)
 
         st.markdown("**✍️ La tua seconda risposta (dopo la guida):**")
         ans2 = st.text_area("Seconda risposta", key="input_ans2", height=130,
-                             placeholder="Integra e approfondisci la tua risposta...", label_visibility="collapsed")
+                             placeholder="Integra e approfondisci...", label_visibility="collapsed")
         if st.button("Invia e valuta →", type="primary", key="btn_ans2"):
             if not ans2.strip():
                 st.warning("Scrivi la tua risposta prima di procedere.")
@@ -304,24 +346,22 @@ def _render_active_session():
                 st.session_state.tutor_state = "evaluated"
                 st.rerun()
 
-    # ── STATO: Valutazione mostrata ───────────────────────────────────────
+    # ── Valutazione ────────────────────────────────────────────────────────
     elif state == "evaluated":
-        ev = st.session_state.get("_eval_result", {})
+        ev    = st.session_state.get("_eval_result", {})
         score = ev.get("score", 0)
         guide = st.session_state.get("_guide_result", {})
+        border = "#10b981" if score >= 8 else ("#f59e0b" if score >= 6 else "#f43f5e")
 
-        # Recap compatto risposte
         with st.expander("📜 Risposte date", expanded=False):
             st.markdown(f"**Prima risposta:** {st.session_state.tutor.attempt.student_answer_1}")
             st.markdown(f"**Guida socratica:** *{guide.get('guiding_question', '')}*")
             st.markdown(f"**Seconda risposta:** {st.session_state.tutor.attempt.student_answer_2}")
 
-        # Risultato
         st.markdown(f"""
-        <div class="sc-card" style="border-left:3px solid {'#10b981' if score>=8 else ('#f59e0b' if score>=6 else '#f43f5e')};">
+        <div class="sc-card" style="border-left:3px solid {border};">
             <div style="display:flex; align-items:center; gap:1rem; margin-bottom:0.75rem;">
-                <div style="font-size:2.5rem; font-family:'Syne',sans-serif; font-weight:800;"
-                     class="{'score-high' if score>=8 else ('score-mid' if score>=6 else 'score-low')}">
+                <div style="font-size:2.5rem; font-family:'Syne',sans-serif; font-weight:800; color:{border};">
                     {score}/10
                 </div>
                 <div style="flex:1;">
@@ -354,7 +394,6 @@ def _render_active_session():
 
         st.markdown("<div style='height:0.75rem'></div>", unsafe_allow_html=True)
 
-        # Contestazione
         with st.expander("⚖️ Vuoi contestare il voto?", expanded=False):
             contest_text = st.text_area("La tua argomentazione", key="contest_input", height=100,
                                          placeholder="Spiega perché ritieni che il voto non sia corretto...")
@@ -373,24 +412,24 @@ def _render_active_session():
             if st.button("Prossima domanda →", type="primary", key="btn_next_eval"):
                 _close_and_advance(engine, current_q, score, sess)
 
-    # ── STATO: Dopo contestazione ─────────────────────────────────────────
+    # ── Dopo contestazione ─────────────────────────────────────────────────
     elif state == "contested":
-        cr = st.session_state.get("_contest_result", {})
+        cr          = st.session_state.get("_contest_result", {})
         final_score = cr.get("final_score", 0)
-        delta = cr.get("score_delta", 0)
-        assessment = cr.get("contestation_assessment", "non_valido")
-
-        color_map = {"valido": "#10b981", "parzialmente_valido": "#f59e0b", "non_valido": "#f43f5e"}
-        color = color_map.get(assessment, "#6b7280")
+        delta       = cr.get("score_delta", 0)
+        assessment  = cr.get("contestation_assessment", "non_valido")
+        color_map   = {"valido": "#10b981", "parzialmente_valido": "#f59e0b", "non_valido": "#f43f5e"}
+        color       = color_map.get(assessment, "#6b7280")
+        score_color = "#10b981" if final_score >= 8 else ("#f59e0b" if final_score >= 6 else "#f43f5e")
+        delta_text  = f"+{delta} punto/i" if delta > 0 else "voto invariato"
 
         st.markdown(f"""
         <div class="sc-card" style="border-left:3px solid {color};">
             <div style="font-size:0.78rem; color:#6b7280; margin-bottom:0.5rem; text-transform:uppercase; letter-spacing:0.05em;">
                 ⚖️ Contestazione: <span style="color:{color}; font-weight:700;">{assessment.replace('_', ' ')}</span>
-                {f'&nbsp;&mdash;&nbsp; +{delta} punto/i' if delta > 0 else '&nbsp;&mdash;&nbsp; voto invariato'}
+                &nbsp;&mdash;&nbsp; {delta_text}
             </div>
-            <div style="font-size:2rem; font-family:'Syne',sans-serif; font-weight:800;
-                        color:{'#10b981' if final_score>=8 else ('#f59e0b' if final_score>=6 else '#f43f5e')};">
+            <div style="font-size:2rem; font-family:'Syne',sans-serif; font-weight:800; color:{score_color};">
                 {final_score}/10
             </div>
             <p style="margin-top:0.5rem; font-size:0.9rem; color:#d1d5db;">
@@ -405,34 +444,34 @@ def _render_active_session():
                 _close_and_advance(engine, current_q, final_score, sess)
 
 
+# ── Avanza alla prossima domanda ───────────────────────────────────────────
+
 def _close_and_advance(engine: AdaptiveEngine, current_q: dict, final_score: int, sess: dict):
-    """Chiude il tutor corrente, registra il risultato, avanza."""
-    attempt = st.session_state.tutor.close()
+    st.session_state.tutor.close()
     engine.record_answer(
         question_id=current_q["id"],
         topic=current_q.get("topic_hint", "generale"),
         score=final_score,
     )
-    # Rimuovi domanda dai rimanenti
+
+    # Serializza in formato piatto compatibile con history.py
+    log_entry = _attempt_to_log_entry(st.session_state.tutor, final_score)
+
     sess["remaining"] = [q for q in sess["remaining"] if q["id"] != current_q["id"]]
-    sess["attempts"].append(st.session_state.tutor.to_dict())
+    sess["attempts"].append(log_entry)
     sess["scores"].append(final_score)
     st.session_state.current_session = sess
 
-    # Reset stato
-    st.session_state.tutor         = None
-    st.session_state.tutor_state   = "idle"
+    st.session_state.tutor       = None
+    st.session_state.tutor_state = "idle"
     st.session_state.pop("_current_q", None)
     st.session_state.pop("_guide_result", None)
     st.session_state.pop("_eval_result", None)
     st.session_state.pop("_contest_result", None)
 
-    # Salva progressi nel DB ogni N domande o all'ultimo
     if not sess["remaining"]:
-        _save_session(
-            sess["id"], sess["attempts"], engine,
-            st.session_state.current_exam
-        )
+        _save_session(sess["id"], sess["attempts"], engine, st.session_state.current_exam)
+
     st.rerun()
 
 
@@ -464,26 +503,26 @@ def _render_session_complete():
     </div>
     """, unsafe_allow_html=True)
 
-    # Breakdown per domanda
     st.markdown("### Riepilogo domande")
     questions = sess["questions"]
-    q_map = {q["id"]: q for q in questions}
+    q_map     = {q["id"]: q for q in questions}
 
     for i, (attempt, score) in enumerate(zip(sess["attempts"], scores), 1):
         q = q_map.get(attempt.get("question_id"), {})
+        text = q.get("text", "")
+        short = text[:80] + ("…" if len(text) > 80 else "")
         st.markdown(f"""
         <div class="sc-card" style="padding:0.75rem 1rem;">
             <div style="display:flex; justify-content:space-between; align-items:center;">
                 <div style="flex:1;">
                     <span style="color:#6b7280; font-size:0.78rem;">Q{i}</span>
-                    <span style="margin-left:0.5rem; font-size:0.9rem;">{q.get('text','')[:80]}{'…' if len(q.get('text',''))>80 else ''}</span>
+                    <span style="margin-left:0.5rem; font-size:0.9rem;">{short}</span>
                 </div>
                 <div style="margin-left:1rem;">{_score_badge(score)}</div>
             </div>
         </div>
         """, unsafe_allow_html=True)
 
-    # Report
     report_path = None
     db = SessionLocal()
     try:
@@ -525,7 +564,7 @@ def _render_session_complete():
             st.rerun()
 
 
-# ── Entry point ─────────────────────────────────────────────────────────────
+# ── Entry point ────────────────────────────────────────────────────────────
 
 def render():
     _require_auth()
@@ -534,7 +573,7 @@ def render():
 
     if st.session_state.current_session is None:
         _render_quiz_generation()
-    elif st.session_state.tutor_state in ("closed",) and not st.session_state.current_session.get("remaining"):
+    elif not st.session_state.current_session.get("remaining") and st.session_state.tutor_state in ("idle", "closed"):
         _render_session_complete()
     else:
         _render_active_session()

@@ -1,35 +1,32 @@
-import os
 import json
 from pathlib import Path
 from pypdf import PdfReader
 import chromadb
 from chromadb import Documents, EmbeddingFunction, Embeddings
-import google.generativeai as genai
+from sentence_transformers import SentenceTransformer
 from dotenv import load_dotenv
 
 load_dotenv()
 
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-
 CHROMA_PATH = "./data/chroma"
 client = chromadb.PersistentClient(path=CHROMA_PATH)
 
+# Modello locale leggero (~90MB, scaricato automaticamente la prima volta)
+_model = SentenceTransformer("all-MiniLM-L6-v2")
 
-class GeminiEmbeddingFunction(EmbeddingFunction):
-    """Embedding function custom che usa Gemini text-embedding-004."""
+
+class LocalEmbeddingFunction(EmbeddingFunction):
+    """
+    Embedding locale con sentence-transformers.
+    Nessuna API key richiesta, funziona offline.
+    Modello: all-MiniLM-L6-v2 (384 dimensioni, veloce e preciso)
+    """
     def __call__(self, texts: Documents) -> Embeddings:
-        result = genai.embed_content(
-            model="models/text-embedding-004",
-            content=texts,
-            task_type="retrieval_document"
-        )
-        embeddings: list = result["embedding"]
-        if embeddings and isinstance(embeddings[0], float):
-            embeddings = [embeddings]
-        return embeddings  # type: ignore[return-value]
+        embeddings = _model.encode(list(texts), convert_to_numpy=True)
+        return embeddings.tolist()
 
 
-gemini_ef = GeminiEmbeddingFunction()
+local_ef = LocalEmbeddingFunction()
 
 
 def get_collection(student_id: int, exam_id: int) -> chromadb.Collection:
@@ -37,7 +34,7 @@ def get_collection(student_id: int, exam_id: int) -> chromadb.Collection:
     name = f"student_{student_id}_exam_{exam_id}"
     return client.get_or_create_collection(
         name=name,
-        embedding_function=gemini_ef,
+        embedding_function=local_ef,
         metadata={"student_id": student_id, "exam_id": exam_id}
     )
 
@@ -55,10 +52,6 @@ def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> list[str]
 
 
 def ingest_pdf(pdf_path: str, student_id: int, exam_id: int) -> dict:
-    """
-    Legge un PDF, lo divide in chunk, genera embedding e salva in ChromaDB.
-    Ritorna un dizionario con le statistiche dell'indicizzazione.
-    """
     path = Path(pdf_path)
     if not path.exists():
         raise FileNotFoundError(f"PDF non trovato: {pdf_path}")
@@ -111,21 +104,9 @@ def ingest_pdf(pdf_path: str, student_id: int, exam_id: int) -> dict:
     return stats
 
 
-def retrieve_chunks(
-    query: str,
-    student_id: int,
-    exam_id: int,
-    n_results: int = 5
-) -> list[str]:
-    """
-    Recupera i chunk più rilevanti per una query.
-    Usato dal Quiz Generator e dal Socratic Tutor.
-    """
+def retrieve_chunks(query: str, student_id: int, exam_id: int, n_results: int = 5) -> list[str]:
     collection = get_collection(student_id, exam_id)
-    results = collection.query(
-        query_texts=[query],
-        n_results=n_results
-    )
+    results = collection.query(query_texts=[query], n_results=n_results)
     documents = results.get("documents")
     if not documents or not documents[0]:
         return []
@@ -133,10 +114,6 @@ def retrieve_chunks(
 
 
 def delete_exam_collection(student_id: int, exam_id: int) -> None:
-    """
-    Elimina tutti i chunk di un esame.
-    Da chiamare se lo studente ricarica il materiale.
-    """
     name = f"student_{student_id}_exam_{exam_id}"
     try:
         client.delete_collection(name)

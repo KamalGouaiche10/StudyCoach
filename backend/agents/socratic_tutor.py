@@ -1,61 +1,60 @@
 """
 Socratic Tutor Agent — Study Coach
 =====================================
-Responsabilità: gestire il loop di interrogazione socratica per una singola domanda.
+Gestisce il loop di interrogazione socratica per una singola domanda.
 
-Loop per ogni domanda:
-    1. Mostra domanda allo studente
-    2. ricevi risposta_1
-    3. genera domanda_guida socratica (NON dà la risposta)
-    4. ricevi risposta_2
-    5. valuta con score 0-10 + motivazione
-    6. (opzionale) ricevi contestazione → rivaluta
+Loop per domanda:
+    1. start(question)          → mostra domanda
+    2. submit_answer_1(ans)     → genera domanda guida (Agno GuideAgent)
+    3. submit_answer_2(ans)     → valuta 0-10 (Agno EvalAgent)
+    4. submit_contestation(arg) → rivaluta (Agno ContestAgent)  [opzionale]
+    5. close()                  → restituisce QuestionAttempt finale
 
+Ogni step usa un Agent Agno dedicato con prompt versionato.
 Prompt versionati:
-    - socratic_tutor_guide_v1.txt   → step 3
-    - socratic_tutor_eval_v1.txt    → step 5
-    - socratic_tutor_contest_v1.txt → step 6
-
-Lo stato dell'intera sessione (tutte le domande + risposte) viene mantenuto
-nel QuestionAttempt e poi serializzato nel qa_log della Session ORM.
+    - socratic_tutor_guide_v1.txt
+    - socratic_tutor_eval_v1.txt
+    - socratic_tutor_contest_v1.txt
 """
 
 import json
 import re
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from enum import Enum, auto
 from pathlib import Path
 from typing import cast
 
-import google.generativeai as genai
+from agno.agent import Agent
+from agno.models.groq import Groq
+from dotenv import load_dotenv
 
 from backend.agents.ingestor import retrieve_chunks
 
+load_dotenv()
+
 # ---------------------------------------------------------------------------
-# Costanti e path dei prompt versionati
+# Costanti
 # ---------------------------------------------------------------------------
 
-PROMPTS_DIR = Path(__file__).parent / "prompts"
-
+PROMPTS_DIR     = Path(__file__).parent / "prompts"
 PROMPT_GUIDE    = "socratic_tutor_guide_v1"
 PROMPT_EVAL     = "socratic_tutor_eval_v1"
 PROMPT_CONTEST  = "socratic_tutor_contest_v1"
 
-DEFAULT_MODEL     = "gemini-1.5-flash"
-DEFAULT_N_CHUNKS  = 5
+DEFAULT_MODEL    = "llama-3.3-70b-versatile"   # Groq
+DEFAULT_N_CHUNKS = 5
 
 
 # ---------------------------------------------------------------------------
-# Stato del loop socratico per una singola domanda
+# Stato del loop
 # ---------------------------------------------------------------------------
 
 class TurnState(Enum):
-    """Stato corrente del loop per una domanda."""
-    WAITING_ANSWER_1   = auto()   # in attesa della prima risposta
-    WAITING_ANSWER_2   = auto()   # domanda guida inviata, in attesa della seconda risposta
-    EVALUATED          = auto()   # valutato, contestazione ancora possibile
-    CONTESTED          = auto()   # contestazione ricevuta, rivalutato
-    CLOSED             = auto()   # chiuso definitivamente (no contestazione o già contestata)
+    WAITING_ANSWER_1 = auto()
+    WAITING_ANSWER_2 = auto()
+    EVALUATED        = auto()
+    CONTESTED        = auto()
+    CLOSED           = auto()
 
 
 @dataclass
@@ -72,44 +71,31 @@ class ContestationResult:
     final_score: int
     score_changed: bool
     score_delta: int
-    contestation_assessment: str   # "valido" | "parzialmente_valido" | "non_valido"
+    contestation_assessment: str
     final_motivation: str
     response_to_student: str
 
 
 @dataclass
 class QuestionAttempt:
-    """
-    Rappresenta il tentativo completo di uno studente su una singola domanda.
-    Viene serializzato nel qa_log della Session.
-    """
     question_id: int
     question_text: str
     difficulty: str
     topic_hint: str
 
-    # Turno 1
     student_answer_1: str = ""
-
-    # Turno 2 — guida socratica
     guiding_question: str = ""
     positive_feedback: str = ""
     focus_area: str = ""
     student_answer_2: str = ""
 
-    # Valutazione
     evaluation: EvaluationResult | None = None
-
-    # Contestazione (opzionale)
     contestation_text: str = ""
     contestation_result: ContestationResult | None = None
-
-    # Stato corrente
     state: TurnState = TurnState.WAITING_ANSWER_1
 
     @property
     def final_score(self) -> int | None:
-        """Score definitivo: usa il voto della contestazione se disponibile."""
         if self.contestation_result is not None:
             return self.contestation_result.final_score
         if self.evaluation is not None:
@@ -118,7 +104,7 @@ class QuestionAttempt:
 
 
 # ---------------------------------------------------------------------------
-# Caricamento prompt versionati
+# Helpers
 # ---------------------------------------------------------------------------
 
 def _load_prompt(version_name: str) -> str:
@@ -126,14 +112,9 @@ def _load_prompt(version_name: str) -> str:
     if not path.exists():
         raise FileNotFoundError(f"Prompt non trovato: {path}")
     raw = path.read_text(encoding="utf-8")
-    # Rimuove il frontmatter documentativo (tutto prima del secondo "---\n\n")
     parts = raw.split("---\n\n", maxsplit=1)
     return parts[-1]
 
-
-# ---------------------------------------------------------------------------
-# Parsing JSON dalla risposta LLM
-# ---------------------------------------------------------------------------
 
 def _parse_json(raw: str) -> dict:
     cleaned = re.sub(r"```(?:json)?\s*", "", raw).strip().rstrip("`").strip()
@@ -141,36 +122,76 @@ def _parse_json(raw: str) -> dict:
         return json.loads(cleaned)
     except json.JSONDecodeError as e:
         raise ValueError(
-            f"Il modello non ha restituito JSON valido.\nErrore: {e}\n"
-            f"Risposta (primi 500 char):\n{raw[:500]}"
+            f"JSON non valido dal modello.\nErrore: {e}\n"
+            f"Risposta (500 char):\n{raw[:500]}"
         ) from e
 
 
 # ---------------------------------------------------------------------------
-# Chiamate LLM — una funzione per ogni prompt
+# Agno agent factories — un agente per ruolo, stateless
 # ---------------------------------------------------------------------------
 
-def _call_gemini(prompt: str, model_name: str) -> str:
-    model = genai.GenerativeModel(model_name)
-    response = model.generate_content(prompt)
-    return response.text
+def _guide_agent(model_name: str) -> Agent:
+    return Agent(
+        name="SocraticGuideAgent",
+        model=Groq(id=model_name),
+        description=(
+            "Sei un tutor socratico universitario. "
+            "NON dare mai la risposta corretta. "
+            "Guida lo studente con domande mirate. "
+            "Rispondi SOLO con JSON valido, senza markdown."
+        ),
+        markdown=False,
 
+    )
+
+
+def _eval_agent(model_name: str) -> Agent:
+    return Agent(
+        name="EvaluatorAgent",
+        model=Groq(id=model_name),
+        description=(
+            "Sei un valutatore universitario esperto e obiettivo. "
+            "Valuta la preparazione dello studente con un voto 0-10. "
+            "Rispondi SOLO con JSON valido, senza markdown."
+        ),
+        markdown=False,
+
+    )
+
+
+def _contest_agent(model_name: str) -> Agent:
+    return Agent(
+        name="ContestationAgent",
+        model=Groq(id=model_name),
+        description=(
+            "Sei un valutatore universitario imparziale. "
+            "Riesamina la valutazione con obiettività dopo la contestazione. "
+            "Rispondi SOLO con JSON valido, senza markdown."
+        ),
+        markdown=False,
+
+    )
+
+
+# ---------------------------------------------------------------------------
+# Step LLM — una funzione per step
+# ---------------------------------------------------------------------------
 
 def _generate_guiding_question(
     attempt: QuestionAttempt,
     context_chunks: list[str],
     model_name: str,
 ) -> dict:
-    """Step 3: genera domanda guida socratica dopo la prima risposta."""
     template = _load_prompt(PROMPT_GUIDE)
     prompt = template.format(
         question=attempt.question_text,
         student_answer_1=attempt.student_answer_1,
         context_chunks="\n\n---\n\n".join(context_chunks),
     )
-    raw = _call_gemini(prompt, model_name)
-    data = _parse_json(raw)
-
+    agent = _guide_agent(model_name)
+    output = agent.run(prompt, stream=False)
+    data = _parse_json(output.get_content_as_string())
     if "guiding_question" not in data:
         raise ValueError(f"Risposta mancante di 'guiding_question': {data}")
     return data
@@ -181,7 +202,6 @@ def _evaluate(
     context_chunks: list[str],
     model_name: str,
 ) -> EvaluationResult:
-    """Step 5: valuta con score 0-10 dopo la seconda risposta."""
     template = _load_prompt(PROMPT_EVAL)
     prompt = template.format(
         question=attempt.question_text,
@@ -190,12 +210,11 @@ def _evaluate(
         student_answer_2=attempt.student_answer_2,
         context_chunks="\n\n---\n\n".join(context_chunks),
     )
-    raw = _call_gemini(prompt, model_name)
-    data = _parse_json(raw)
+    agent = _eval_agent(model_name)
+    output = agent.run(prompt, stream=False)
+    data = _parse_json(output.get_content_as_string())
 
-    score = int(data.get("score", 0))
-    score = max(0, min(10, score))  # clamp 0-10
-
+    score = max(0, min(10, int(data.get("score", 0))))
     return EvaluationResult(
         score=score,
         motivation=data.get("motivation", ""),
@@ -210,10 +229,8 @@ def _re_evaluate_after_contestation(
     context_chunks: list[str],
     model_name: str,
 ) -> ContestationResult:
-    """Step 6: rivaluta dopo contestazione dello studente."""
     if attempt.evaluation is None:
-        raise ValueError("Impossibile rivalutare: nessuna valutazione iniziale.")
-
+        raise ValueError("Nessuna valutazione iniziale: impossibile rivalutare.")
     template = _load_prompt(PROMPT_CONTEST)
     prompt = template.format(
         question=attempt.question_text,
@@ -225,14 +242,12 @@ def _re_evaluate_after_contestation(
         contestation=attempt.contestation_text,
         context_chunks="\n\n---\n\n".join(context_chunks),
     )
-    raw = _call_gemini(prompt, model_name)
-    data = _parse_json(raw)
+    agent = _contest_agent(model_name)
+    output = agent.run(prompt, stream=False)
+    data = _parse_json(output.get_content_as_string())
 
-    final_score = int(data.get("final_score", attempt.evaluation.score))
-    final_score = max(0, min(10, final_score))
-
-    original = attempt.evaluation.score
-    delta = final_score - original
+    final_score = max(0, min(10, int(data.get("final_score", attempt.evaluation.score))))
+    delta = final_score - attempt.evaluation.score
 
     return ContestationResult(
         final_score=final_score,
@@ -245,24 +260,20 @@ def _re_evaluate_after_contestation(
 
 
 # ---------------------------------------------------------------------------
-# SocraticTutor — classe principale che gestisce il loop
+# SocraticTutor — classe principale
 # ---------------------------------------------------------------------------
 
 class SocraticTutor:
     """
-    Gestisce il loop socratico per una singola domanda.
+    Gestisce il loop socratico per una singola domanda usando Agno agents.
 
-    Utilizzo tipico (chiamato dalla route FastAPI o dalla pagina Streamlit):
-
+    Utilizzo:
         tutor = SocraticTutor(student_id=1, exam_id=3)
-        tutor.start(question)                          # mostra domanda
-
-        resp1 = tutor.submit_answer_1("...")           # ritorna domanda guida
-        resp2 = tutor.submit_answer_2("...")           # ritorna valutazione
-        resp3 = tutor.submit_contestation("...")       # (opzionale) ritorna rivalutazione
-        tutor.close()
-
-        attempt = tutor.attempt                        # QuestionAttempt completo
+        tutor.start(question_dict)
+        tutor.submit_answer_1("...")   → domanda guida
+        tutor.submit_answer_2("...")   → valutazione
+        tutor.submit_contestation("...") → rivalutazione (opzionale)
+        tutor.close()                  → QuestionAttempt finale
     """
 
     def __init__(
@@ -272,23 +283,14 @@ class SocraticTutor:
         model_name: str = DEFAULT_MODEL,
         n_chunks: int = DEFAULT_N_CHUNKS,
     ):
-        self.student_id  = student_id
-        self.exam_id     = exam_id
-        self.model_name  = model_name
-        self.n_chunks    = n_chunks
+        self.student_id    = student_id
+        self.exam_id       = exam_id
+        self.model_name    = model_name
+        self.n_chunks      = n_chunks
         self.attempt: QuestionAttempt | None = None
         self._context_cache: list[str] = []
 
-    # ------------------------------------------------------------------
-    # API pubblica del loop
-    # ------------------------------------------------------------------
-
     def start(self, question_data: dict) -> str:
-        """
-        Inizializza il tutor con una domanda.
-        Question_data deve avere: id, text, difficulty, topic_hint.
-        Ritorna il testo della domanda da mostrare allo studente.
-        """
         self.attempt = QuestionAttempt(
             question_id=question_data["id"],
             question_text=question_data["text"],
@@ -296,48 +298,26 @@ class SocraticTutor:
             topic_hint=question_data.get("topic_hint", ""),
             state=TurnState.WAITING_ANSWER_1,
         )
-        # Pre-carica i chunk RAG usando il topic come query
         self._context_cache = retrieve_chunks(
             query=question_data["text"],
             student_id=self.student_id,
             exam_id=self.exam_id,
             n_results=self.n_chunks,
         )
-        attempt = self.attempt
-        if attempt is None:
-            raise RuntimeError("Tutor non inizializzato. Chiama start() prima.")
-        return attempt.question_text
+        return self.attempt.question_text
 
     def submit_answer_1(self, answer: str) -> dict:
-        """
-        Riceve la prima risposta dello studente.
-        Genera e ritorna la domanda guida socratica.
-
-        Returns:
-            {
-                "guiding_question": str,
-                "positive_feedback": str,
-                "focus_area": str,
-            }
-        """
         self._assert_state(TurnState.WAITING_ANSWER_1)
         attempt = cast(QuestionAttempt, self.attempt)
-
         attempt.student_answer_1 = answer.strip()
 
-        data = _generate_guiding_question(
-            attempt, self._context_cache, self.model_name
-        )
-
-        attempt.guiding_question = data["guiding_question"]
+        data = _generate_guiding_question(attempt, self._context_cache, self.model_name)
+        attempt.guiding_question  = data["guiding_question"]
         attempt.positive_feedback = data.get("positive_feedback", "")
-        attempt.focus_area = data.get("focus_area", "")
-        attempt.state = TurnState.WAITING_ANSWER_2
+        attempt.focus_area        = data.get("focus_area", "")
+        attempt.state             = TurnState.WAITING_ANSWER_2
 
-        print(
-            f"[SocraticTutor] Domanda guida generata | "
-            f"q_id={attempt.question_id} | focus={attempt.focus_area}"
-        )
+        print(f"[SocraticGuideAgent] focus={attempt.focus_area} | q_id={attempt.question_id}")
         return {
             "guiding_question": attempt.guiding_question,
             "positive_feedback": attempt.positive_feedback,
@@ -345,33 +325,15 @@ class SocraticTutor:
         }
 
     def submit_answer_2(self, answer: str) -> dict:
-        """
-        Riceve la seconda risposta (dopo la guida).
-        Valuta e ritorna score + motivazione.
-
-        Returns:
-            {
-                "score": int,
-                "motivation": str,
-                "correct_points": list[str],
-                "missing_points": list[str],
-                "improvement_after_guidance": str,
-                "can_contest": True,
-            }
-        """
         self._assert_state(TurnState.WAITING_ANSWER_2)
         attempt = cast(QuestionAttempt, self.attempt)
-
         attempt.student_answer_2 = answer.strip()
 
-        eval_result = _evaluate(attempt, self._context_cache, self.model_name)
+        eval_result    = _evaluate(attempt, self._context_cache, self.model_name)
         attempt.evaluation = eval_result
-        attempt.state = TurnState.EVALUATED
+        attempt.state  = TurnState.EVALUATED
 
-        print(
-            f"[SocraticTutor] Valutazione: {eval_result.score}/10 | "
-            f"q_id={attempt.question_id}"
-        )
+        print(f"[EvaluatorAgent] score={eval_result.score}/10 | q_id={attempt.question_id}")
         return {
             "score": eval_result.score,
             "motivation": eval_result.motivation,
@@ -382,40 +344,17 @@ class SocraticTutor:
         }
 
     def submit_contestation(self, argumentation: str) -> dict:
-        """
-        Riceve l'argomentazione di contestazione dello studente.
-        Rivaluta e ritorna il verdetto finale.
-        Può essere chiamato UNA SOLA VOLTA dopo submit_answer_2.
-
-        Returns:
-            {
-                "final_score": int,
-                "score_changed": bool,
-                "score_delta": int,
-                "contestation_assessment": str,
-                "final_motivation": str,
-                "response_to_student": str,
-            }
-        """
         self._assert_state(TurnState.EVALUATED)
         attempt = cast(QuestionAttempt, self.attempt)
-
         attempt.contestation_text = argumentation.strip()
 
-        contest_result = _re_evaluate_after_contestation(
-            attempt, self._context_cache, self.model_name
-        )
+        contest_result       = _re_evaluate_after_contestation(attempt, self._context_cache, self.model_name)
         attempt.contestation_result = contest_result
-        attempt.state = TurnState.CONTESTED
-
-        evaluation = attempt.evaluation
-        if evaluation is None:
-            raise RuntimeError("Valutazione mancante: impossibile mostrare il voto originale.")
+        attempt.state        = TurnState.CONTESTED
 
         print(
-            f"[SocraticTutor] Contestazione: {contest_result.contestation_assessment} | "
-            f"voto {evaluation.score} → {contest_result.final_score} | "
-            f"q_id={attempt.question_id}"
+            f"[ContestationAgent] {contest_result.contestation_assessment} | "
+            f"{attempt.evaluation.score} → {contest_result.final_score} | q_id={attempt.question_id}"
         )
         return {
             "final_score": contest_result.final_score,
@@ -427,45 +366,32 @@ class SocraticTutor:
         }
 
     def close(self) -> QuestionAttempt:
-        """
-        Chiude il loop definitivamente. Può essere chiamato da EVALUATED o CONTESTED.
-        Ritorna il QuestionAttempt completo da serializzare nel qa_log.
-        """
         if self.attempt is None:
-            raise RuntimeError("Tutor non inizializzato. Chiama start() prima.")
+            raise RuntimeError("Tutor non inizializzato.")
         attempt = self.attempt
         if attempt.state not in (TurnState.EVALUATED, TurnState.CONTESTED):
             raise RuntimeError(
-                f"Non si può chiudere in stato {attempt.state}. "
-                "Lo studente deve aver risposto almeno due volte."
+                f"Non si può chiudere in stato {attempt.state.name}. "
+                "Lo studente deve aver completato almeno due risposte."
             )
         attempt.state = TurnState.CLOSED
         return attempt
 
-    # ------------------------------------------------------------------
-    # Serializzazione — per qa_log della Session
-    # ------------------------------------------------------------------
-
     def to_dict(self) -> dict:
-        """Serializza il QuestionAttempt corrente in dict (per qa_log JSON)."""
         if self.attempt is None:
             return {}
         d = asdict(self.attempt)
-        d["state"] = self.attempt.state.name  # Enum → stringa
+        d["state"] = self.attempt.state.name
         return d
 
     def to_json(self) -> str:
         return json.dumps(self.to_dict(), ensure_ascii=False, indent=2)
-
-    # ------------------------------------------------------------------
-    # Interno
-    # ------------------------------------------------------------------
 
     def _assert_state(self, expected: TurnState) -> None:
         if self.attempt is None:
             raise RuntimeError("Tutor non inizializzato. Chiama start() prima.")
         if self.attempt.state != expected:
             raise RuntimeError(
-                f"Operazione non consentita in stato '{self.attempt.state.name}'. "
-                f"Stato atteso: '{expected.name}'."
+                f"Stato '{self.attempt.state.name}' non valido. "
+                f"Atteso: '{expected.name}'."
             )
