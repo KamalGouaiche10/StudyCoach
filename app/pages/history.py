@@ -131,21 +131,22 @@ def _render_session_detail(sess: DbSession):
         st.info("Sessione senza domande registrate.")
         return
 
-    # Filtra solo attempt nel formato corretto
     valid = [a for a in attempts if _is_valid_attempt(a)]
     if not valid:
         st.info("Il log di questa sessione è in un formato precedente non visualizzabile.")
         return
 
     for i, attempt in enumerate(valid, 1):
-        q_text      = attempt.get("question_text", f"Domanda {i}")
-        score       = attempt.get("final_score", "—")
-        diff        = attempt.get("difficulty", "")
-        topic       = attempt.get("topic_hint", "")
-        diff_css    = {"base": "badge-base", "intermedia": "badge-inter", "avanzata": "badge-avanzata"}.get(diff, "badge-inter")
-        badge_html  = f'<span class="badge {diff_css}">{diff}</span>' if diff else ""
-        topic_html  = f'<div style="color:#6b7280; font-size:0.78rem;">🏷 {topic}</div>' if topic else ""
+        q_text   = attempt.get("question_text", f"Domanda {i}")
+        score    = attempt.get("final_score", "—")
+        diff     = attempt.get("difficulty", "")
+        topic    = attempt.get("topic_hint", "")
+        diff_css = {"base": "badge-base", "intermedia": "badge-inter", "avanzata": "badge-avanzata"}.get(diff, "badge-inter")
+
+        badge_html = f'<span class="badge {diff_css}">{diff}</span>' if diff else ""
+        topic_html = f'<div style="color:#6b7280; font-size:0.78rem;">🏷 {topic}</div>' if topic else ""
         score_color = _score_color(score) if isinstance(score, (int, float)) else "#6b7280"
+        score_display = f"{score}/10" if isinstance(score, (int, float)) else str(score)
 
         st.markdown(f"""
         <div class="sc-card" style="margin-bottom:0.5rem;">
@@ -155,7 +156,7 @@ def _render_session_detail(sess: DbSession):
                     {badge_html}
                 </div>
                 <span style="font-family:'Syne',sans-serif; font-weight:800; font-size:1.1rem; color:{score_color};">
-                    {score}/10
+                    {score_display}
                 </span>
             </div>
             <p style="margin:0 0 0.5rem; font-weight:600; font-size:0.92rem;">{q_text}</p>
@@ -283,65 +284,89 @@ def render():
         date_str  = sess.started_at.strftime("%d/%m/%Y %H:%M") if sess.started_at else "—"
 
         if has_score:
-            verdict_icon = _verdict_emoji(score)
-            score_str    = f"{score}/10"
-            score_color  = _score_color(score)
+            verdict_icon  = _verdict_emoji(score)
+            score_str     = f"{score}/10"
+            score_color   = _score_color(score)
+            border_color  = score_color
         else:
-            verdict_icon = "⏳"
-            score_str    = "In corso"
-            score_color  = "#6b7280"
+            verdict_icon  = "⏳"
+            score_str     = "In corso"
+            score_color   = "#6b7280"
+            border_color  = "#252a36"
 
-        border_color = score_color if has_score else "#252a36"
-        report_label = "📄 Report disponibile" if (sess.report_path and Path(sess.report_path).exists()) else ""
+        has_report = bool(sess.report_path and Path(sess.report_path).exists())
 
-        with st.container():
-            st.markdown(f"""
-            <div class="sc-card" style="border-left:3px solid {border_color};">
-                <div style="display:flex; justify-content:space-between; align-items:center;">
-                    <div>
-                        <div style="font-size:0.78rem; color:#6b7280; margin-bottom:0.3rem;">
-                            {verdict_icon} Sessione #{sess.id} &nbsp;·&nbsp; {date_str} &nbsp;·&nbsp; {duration}
-                        </div>
-                        <div style="font-family:'Syne',sans-serif; font-size:1.4rem; font-weight:800;
-                                    color:{score_color};">
-                            {score_str}
-                        </div>
+        # ── FIX: card HTML separata dai widget Streamlit ──────────────────
+        # In precedenza la card e i bottoni erano mescolati in un unico blocco
+        # che Streamlit non riusciva a renderizzare correttamente quando
+        # has_score=False, lasciando la riga visivamente vuota.
+        st.markdown(f"""
+        <div class="sc-card" style="border-left:3px solid {border_color}; margin-bottom:0.25rem;">
+            <div style="display:flex; justify-content:space-between; align-items:center;">
+                <div>
+                    <div style="font-size:0.78rem; color:#6b7280; margin-bottom:0.3rem;">
+                        {verdict_icon} Sessione #{sess.id} &nbsp;·&nbsp; {date_str} &nbsp;·&nbsp; {duration}
                     </div>
-                    <div style="text-align:right; font-size:0.82rem; color:#6b7280;">
-                        {report_label}
+                    <div style="font-family:'Syne',sans-serif; font-size:1.4rem; font-weight:800;
+                                color:{score_color};">
+                        {score_str}
                     </div>
                 </div>
+                {"<div style='font-size:0.82rem; color:#6b7280;'>📄 Report disponibile</div>" if has_report else "<div></div>"}
             </div>
-            """, unsafe_allow_html=True)
+        </div>
+        """, unsafe_allow_html=True)
 
-            col_detail, col_pdf, col_del = st.columns([2, 1.5, 1])
+        # ── Bottoni sempre renderizzati fuori dall'HTML ───────────────────
+        col_detail, col_notes, col_pdf, col_del = st.columns([2, 1.5, 1.5, 1])
 
-            with col_detail:
-                if sess.qa_log:
-                    with st.expander("📜 Dettaglio Q&A", expanded=False):
-                        _render_session_detail(sess)
+        with col_detail:
+            if sess.qa_log:
+                with st.expander("📜 Dettaglio Q&A", expanded=False):
+                    _render_session_detail(sess)
+            else:
+                # FIX: sessione "In corso" senza qa_log — mostra placeholder
+                st.markdown(
+                    "<p style='color:#6b7280; font-size:0.82rem; margin:0.4rem 0;'>"
+                    "Sessione non ancora completata.</p>",
+                    unsafe_allow_html=True,
+                )
 
-            with col_pdf:
-                if sess.report_path and Path(sess.report_path).exists():
-                    with open(sess.report_path, "rb") as f:
-                        st.download_button(
-                            "📥 Report PDF",
-                            data=f,
-                            file_name=f"report_sessione_{sess.id}.pdf",
-                            mime="application/pdf",
-                            key=f"dl_{sess.id}",
-                            use_container_width=True,
-                        )
+        with col_notes:
+            if sess.qa_log:
+                if st.button("📋 Appunti", key=f"notes_{sess.id}", use_container_width=True,
+                             help="Visualizza gli appunti sintetici generati per questa sessione"):
+                    st.session_state[f"show_notes_{sess.id}"] = not st.session_state.get(f"show_notes_{sess.id}", False)
+                    st.rerun()
 
-            with col_del:
-                # Permette di eliminare sessioni "In corso" o corrotte
-                if not has_score:
-                    if st.button("🗑 Elimina", key=f"del_sess_{sess.id}", use_container_width=True,
-                                 help="Elimina sessione incompleta"):
-                        _delete_session(sess.id)
-                        st.rerun()
+        with col_pdf:
+            if has_report:
+                with open(sess.report_path, "rb") as f:
+                    st.download_button(
+                        "📥 Report PDF",
+                        data=f,
+                        file_name=f"report_sessione_{sess.id}.pdf",
+                        mime="application/pdf",
+                        key=f"dl_{sess.id}",
+                        use_container_width=True,
+                    )
 
-            st.markdown("<div style='height:0.1rem'></div>", unsafe_allow_html=True)
+        with col_del:
+            # FIX: il bottone "Elimina" era visibile solo per sessioni senza
+            # score, ma una sessione "In corso" può non avere qa_log né score.
+            # Ora il bottone compare per qualsiasi sessione incompleta
+            # (ended_at assente), non solo per quelle senza score.
+            if sess.ended_at is None:
+                if st.button("🗑 Elimina", key=f"del_sess_{sess.id}", use_container_width=True,
+                             help="Elimina sessione incompleta"):
+                    _delete_session(sess.id)
+                    st.rerun()
+
+        # ── Pannello appunti sintetici ─────────────────────────────────────
+        if st.session_state.get(f"show_notes_{sess.id}", False):
+            _render_notes_panel(sess)
+
+        st.markdown("<div style='height:0.1rem'></div>", unsafe_allow_html=True)
 
     # ── Bottone nuova sessione ─────────────────────────────────────────────
     st.markdown("<hr style='border-color:#252a36; margin:1.5rem 0 1rem'>", unsafe_allow_html=True)
@@ -349,6 +374,44 @@ def render():
     with col_btn:
         if st.button("▶ Nuova sessione", type="primary", use_container_width=True):
             _go_to_session(selected_exam)
+
+
+def _render_notes_panel(sess: DbSession):
+    """Pannello inline che mostra gli appunti sintetici per la sessione."""
+    cache_key = f"_notes_cache_{sess.id}"
+
+    if cache_key not in st.session_state:
+        if not sess.qa_log:
+            st.info("Nessun dato disponibile per generare appunti.")
+            return
+        try:
+            from backend.agents.notes_generator import generate_notes_from_log
+            attempts = json.loads(sess.qa_log)
+            with st.spinner("Generazione appunti sintetici in corso..."):
+                notes = generate_notes_from_log(attempts)
+            st.session_state[cache_key] = notes
+        except Exception as e:
+            st.error(f"Errore generazione appunti: {e}")
+            return
+
+    notes = st.session_state.get(cache_key, "")
+    if not notes:
+        return
+
+    # FIX: prima il testo degli appunti veniva interpolato dentro unsafe_allow_html
+    # come stringa grezza, rompendo il Markdown (bullet, grassetto, titoli).
+    # Ora la card del titolo è HTML, il contenuto è renderizzato via st.markdown nativo.
+    st.markdown(f"""
+    <div style="background:#0f1319; border:1px solid #252a36; border-radius:10px;
+                padding:1.25rem 1.5rem 0.5rem; margin:0.5rem 0 0.25rem;">
+        <div style="font-family:'Syne',sans-serif; font-weight:700; font-size:0.95rem;
+                    color:#6c63ff; margin-bottom:0.5rem;">
+            📋 Appunti sintetici — Sessione #{sess.id}
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+    # Il contenuto Markdown viene reso da Streamlit, non da HTML inline
+    st.markdown(notes)
 
 
 def _go_to_session(exam):

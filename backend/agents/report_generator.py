@@ -15,7 +15,7 @@ from pathlib import Path
 
 from fpdf import FPDF
 
-REPORTS_DIR = Path("./reports")
+REPORTS_DIR = Path(__file__).parent.parent.parent / "reports"
 REPORTS_DIR.mkdir(exist_ok=True)
 
 
