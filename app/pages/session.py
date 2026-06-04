@@ -93,10 +93,44 @@ def _navbar() -> None:
         """, unsafe_allow_html=True)
     with col2:
         if st.button("← Esci", use_container_width=True):
+            # FIX — se c'è una sessione parzialmente completata,
+            # chiude la sessione nel DB (ended_at=now, qa_log parziale)
+            # così non appare come "Non completata" senza dati in history.
+            sess = st.session_state.get("current_session")
+            if sess and sess.get("id"):
+                _mark_session_interrupted(sess)
             st.session_state.current_page = "upload"
             st.session_state.current_exam = None
             st.rerun()
     st.markdown("<hr style='border-color:#252a36; margin:0.5rem 0 1rem'>", unsafe_allow_html=True)
+
+
+def _mark_session_interrupted(sess: dict) -> None:
+    """
+    FIX — Marca una sessione interrotta (uscita prematura) nel DB:
+    - imposta ended_at = now
+    - salva il qa_log parziale (le domande già risposte)
+    - NON genera report né imposta score_total (rimane NULL)
+    Così in history la sessione mostra "Non completata" con i Q&A già fatti,
+    invece di apparire completamente vuota.
+    """
+    session_id = sess.get("id")
+    if not session_id:
+        return
+    attempts = sess.get("attempts", [])
+    db = SessionLocal()
+    try:
+        db_sess = db.query(DbSession).filter(DbSession.id == session_id).first()
+        if db_sess and db_sess.ended_at is None:
+            db_sess.ended_at = datetime.now(timezone.utc)
+            if attempts:
+                db_sess.qa_log = json.dumps(attempts, ensure_ascii=False)
+            db.commit()
+    except Exception as e:
+        db.rollback()
+        print(f"[session.py] Errore _mark_session_interrupted: {e}")
+    finally:
+        db.close()
 
 
 # ── Barra progresso ────────────────────────────────────────────────────────
@@ -154,8 +188,11 @@ def _save_session(
     exam: dict,
 ) -> Optional[str]:
     """
-    Salva la sessione nel DB e genera report PDF + MD.
+    Salva la sessione completata nel DB e genera report PDF + MD.
     Restituisce il path assoluto del PDF, o None in caso di errore.
+
+    FIX: controlla che la sessione non sia già stata salvata (ended_at
+    già impostato) per evitare doppi salvataggi in caso di rerun multipli.
     """
     db = SessionLocal()
     try:
@@ -164,19 +201,31 @@ def _save_session(
             st.error(f"Sessione {session_id} non trovata nel DB.")
             return None
 
-        report        = engine.generate_session_report()
-        sess.ended_at    = datetime.now(timezone.utc)
-        sess.score_total = float(report["overall_avg"])
+        # Se sessione già chiusa e con report valido, evita doppi salvataggi.
+        if sess.ended_at is not None and sess.score_total is not None and sess.report_path:
+            existing_pdf = Path(str(sess.report_path))
+            if existing_pdf.exists():
+                st.session_state["_last_report_pdf"] = str(existing_pdf)
+                return str(existing_pdf)
+
+        report = engine.generate_session_report()
+        if sess.ended_at is None:
+            sess.ended_at = datetime.now(timezone.utc)
+        if sess.score_total is None:
+            sess.score_total = float(report["overall_avg"])
         sess.qa_log      = json.dumps(attempts, ensure_ascii=False)
 
-        paths    = save_report(report, session_id, str(exam.get("name", "Esame")))
-        pdf_path = str(paths.get("pdf", ""))
+        paths = save_report(report, session_id, str(exam.get("name", "Esame")))
+        pdf_path = str(paths.get("pdf") or "")
 
-        sess.report_path = pdf_path
+        if pdf_path and Path(pdf_path).exists():
+            sess.report_path = pdf_path
+            st.session_state["_last_report_pdf"] = pdf_path
+        else:
+            sess.report_path = None
+            st.session_state.pop("_last_report_pdf", None)
         db.commit()
-
-        st.session_state["_last_report_pdf"] = pdf_path
-        return pdf_path
+        return str(sess.report_path) if sess.report_path else None
 
     except Exception as e:
         db.rollback()
@@ -259,14 +308,14 @@ def _render_quiz_generation() -> None:
 # ── FASE 2: Loop socratico ─────────────────────────────────────────────────
 
 def _render_active_session() -> None:
-    sess:   dict         = st.session_state.current_session
+    sess:   dict           = st.session_state.current_session
     engine: AdaptiveEngine = st.session_state.adaptive_engine
-    exam:   dict         = st.session_state.current_exam
-    state:  str          = str(st.session_state.tutor_state)
+    exam:   dict           = st.session_state.current_exam
+    state:  str            = str(st.session_state.tutor_state)
 
-    total_q: int   = len(sess["questions"])
-    done_q:  int   = len(sess["attempts"])
-    scores:  list  = sess["scores"]
+    total_q: int  = len(sess["questions"])
+    done_q:  int  = len(sess["attempts"])
+    scores:  list = sess["scores"]
 
     _progress_bar(done_q, total_q, scores)
 
@@ -385,9 +434,9 @@ def _render_active_session() -> None:
 
     # ── Valutazione ────────────────────────────────────────────────────────
     elif state == "evaluated":
-        ev:     dict         = st.session_state.get("_eval_result") or {}
-        score:  int          = int(ev.get("score", 0))
-        guide:  dict         = st.session_state.get("_guide_result") or {}
+        ev:     dict          = st.session_state.get("_eval_result") or {}
+        score:  int           = int(ev.get("score", 0))
+        guide:  dict          = st.session_state.get("_guide_result") or {}
         tutor:  SocraticTutor = st.session_state.tutor
         attempt: QuestionAttempt = tutor.attempt  # type: ignore[assignment]
         border: str = "#10b981" if score >= 8 else ("#f59e0b" if score >= 6 else "#f43f5e")
@@ -517,6 +566,9 @@ def _close_and_advance(
     st.session_state.pop("_eval_result", None)
     st.session_state.pop("_contest_result", None)
 
+    # FIX — salva la sessione appena finisce l'ultima domanda.
+    # Il controllo ended_at in _save_session evita doppi salvataggi
+    # in caso di rerun successivi di Streamlit.
     if not sess["remaining"]:
         _save_session(
             session_id=int(sess["id"]),
@@ -534,6 +586,18 @@ def _render_session_complete() -> None:
     sess:   dict  = st.session_state.current_session
     scores: list  = sess["scores"]
     avg:    float = round(sum(scores) / len(scores), 1) if scores else 0.0
+
+    # FIX — tenta il salvataggio anche qui, nel caso _close_and_advance
+    # non l'avesse completato (edge case: rerun multipli o sessione
+    # arrivata a questa fase senza passare da _close_and_advance).
+    engine: Optional[AdaptiveEngine] = st.session_state.get("adaptive_engine")
+    if engine and sess.get("id"):
+        _save_session(
+            session_id=int(sess["id"]),
+            attempts=sess["attempts"],
+            engine=engine,
+            exam=st.session_state.current_exam,
+        )
 
     if avg >= 8:
         emoji, label, color = "🏆", "Ottimo!", "#10b981"
@@ -604,9 +668,21 @@ def _render_session_complete() -> None:
                 )
         else:
             if "_last_report_pdf" in st.session_state:
-                st.warning("⚠️ Report PDF non disponibile.")
+                # PDF generation fallì, ma sempre permetti il retry
+                if st.button("🔄 Riprova generazione PDF", use_container_width=True, key="retry_pdf"):
+                    with st.spinner("Rigenerazione PDF in corso..."):
+                        pdf_path = _save_session(
+                            session_id=int(sess["id"]),
+                            attempts=sess["attempts"],
+                            engine=engine,
+                            exam=st.session_state.current_exam,
+                        )
+                        if pdf_path and Path(pdf_path).exists():
+                            st.success("✅ PDF generato con successo! Ricarica la pagina.")
+                        else:
+                            st.error("❌ Impossibile generare il PDF. Verifica i log del server.")
             else:
-                st.info("Report PDF in elaborazione...")
+                st.info("⏳ Report PDF in elaborazione... Ricarica la pagina tra poco.")
 
     with col2:
         if st.button("📋 Vai allo storico", use_container_width=True):

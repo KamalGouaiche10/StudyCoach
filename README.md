@@ -1,93 +1,326 @@
-# studycoach
+# Study Coach 🎓
 
+**Assistente intelligente per la preparazione personalizzata agli esami universitari.**
 
+Study Coach è un sistema AI completo che supporta gli studenti nel percorso verso il successo accademico attraverso:
+- Indicizzazione intelligente del materiale (RAG + ChromaDB)
+- Generazione dinamica di quiz calibrati
+- Interrogazione socratica adattiva con metodo Socrate
+- Tracciamento dei progressi e report personalizzati
 
-## Getting started
+---
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
+## 🚀 Caratteristiche Principali
 
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
+### 📚 RAG (Retrieval-Augmented Generation)
+- **Upload PDF**: Carica appunti e materiale di studio
+- **Indicizzazione vettoriale**: ChromaDB persistente con embeddings locali (all-MiniLM-L6-v2)
+- **Retrieval semantico**: Recupero intelligente dei contenuti rilevanti per ogni domanda
 
-## Add your files
+### 🎯 Quiz Generazione Adattiva
+- **Quiz dinamici**: Generati dal materiale indicizzato usando Agno + Groq
+- **Difficoltà progressiva**: base → intermedia → avanzata
+- **Tema personalizzato**: Personalizzabile per topic specifici
 
-* [Create](https://docs.gitlab.com/user/project/repository/web_editor/#create-a-file) or [upload](https://docs.gitlab.com/user/project/repository/web_editor/#upload-a-file) files
-* [Add files using the command line](https://docs.gitlab.com/topics/git/add_files/#add-files-to-a-git-repository) or push an existing Git repository with the following command:
+### 🤔 Interrogazione Socratica
+- **Loop adattivo per domanda**:
+  1. Presentazione domanda
+  2. Prima risposta → feedback socratico (guiding question)
+  3. Seconda risposta → valutazione 0-10
+  4. Contestazione opzionale → rivalutazione
+- **Metodo Socrate**: Guida lo studente senza dare direttamente le risposte
+- **Feedback costruttivo**: Punti corretti, lacune identificate, argomenti da rivedere
+
+### 🧠 Adaptive Engine
+- **Tracking topic**: Registra performance per singolo argomento
+- **Prioritizzazione intelligente**: Propone prossime domande su aree deboli
+- **Strategia adattiva**:
+  1. Domande su topic deboli (media < 6 o primo tentativo scarso)
+  2. Domande su topic non ancora visti
+  3. Qualunque domanda rimanente
+
+### 📊 Report Finale
+- **Markdown + PDF**: Report completi e scaricabili
+- **Performance per topic**: Tabelle dettagliate, grafici, metriche
+- **Verdetto**: 🟢 Ottimo / 🟡 Sufficiente / 🔴 Insufficiente
+- **Aree di miglioramento**: Consigli specifici su topic deboli
+
+---
+
+## 📋 Stack Tecnologico
+
+| Componente | Tecnologie |
+|---|---|
+| **Linguaggio** | Python 3.11+ |
+| **Framework Agent** | Agno (orchestrazione multi-agent) |
+| **LLM** | Groq (llama-3.3-70b-versatile) via Agno |
+| **Vector DB** | ChromaDB persistente (data/chroma/) |
+| **Embeddings** | all-MiniLM-L6-v2 (locale, ~90MB) |
+| **Frontend** | Streamlit multi-pagina |
+| **Backend API** | FastAPI + Uvicorn |
+| **Database** | SQLAlchemy + SQLite |
+| **PDF** | pypdf per estrazione, fpdf2 per generazione |
+| **Configurazione** | python-dotenv (.env) |
+
+---
+
+## 🛠️ Installazione
+
+### Prerequisiti
+- Python 3.11+
+- pip o uv
+
+### Setup Ambiente
+
+```bash
+# Clone repository
+git clone <repo-url>
+cd StudyCoach
+
+# Installa dipendenze
+pip install -r requirements.txt
+# oppure
+uv pip install -r requirements.txt
+
+# Configura variabili d'ambiente
+cp .env.example .env
+# Edita .env con le tue API key (GROQ_API_KEY, etc.)
+```
+
+### Variabili d'Ambiente (.env)
+
+```dotenv
+GROQ_API_KEY=gsk_...          # API key Groq per LLM
+GEMINI_API_KEY=AIzaSy...       # API key Google (facoltativo)
+```
+
+---
+
+## 🚀 Avvio
+
+### Frontend Streamlit
+```bash
+streamlit run app/main.py
+```
+Accedi a `http://localhost:8501`
+
+### Backend API (FastAPI)
+```bash
+uvicorn backend.api.main:app --reload --port 8000
+```
+Accedi a:
+- Swagger UI: `http://localhost:8000/docs`
+- ReDoc: `http://localhost:8000/redoc`
+
+### Run Entrambi (parallelo)
+```bash
+# Terminal 1
+streamlit run app/main.py
+
+# Terminal 2
+uvicorn backend.api.main:app --reload --port 8000
+```
+
+---
+
+## 📖 Flusso Principale
 
 ```
-cd existing_repo
-git remote add origin https://gitlab.di.unipmn.it/appintelligenti1/studycoach.git
-git branch -M main
-git push -uf origin main
+LOGIN/REGISTER
+    ↓
+CARICA ESAME + PDF
+    ↓
+INDICIZZA MATERIALE (RAG)
+    ↓
+APRI SESSIONE STUDIO
+    ↓
+GENERA QUIZ
+    ↓
+LOOP SOCRATICO PER OGNI DOMANDA:
+  1. Start → presenta domanda
+  2. Answer 1 → feedback guida
+  3. Answer 2 → valutazione 0-10
+  4. Contest? (opzionale) → rivalutazione
+  5. Close → salva tentativo
+    ↓
+ADAPTIVE ENGINE:
+  - Traccia performance per topic
+  - Sceglie prossima domanda su aree deboli
+    ↓
+RIPORTA ALL'UTENTE:
+  - Media complessiva
+  - Topic deboli/forti
+  - Aree da rivedere
+    ↓
+GENERA REPORT:
+  - Markdown (reports/{student}_{exam}_{session}.md)
+  - PDF (reports/{student}_{exam}_{session}.pdf)
 ```
 
-## Integrate with your tools
+---
 
-* [Set up project integrations](https://gitlab.di.unipmn.it/appintelligenti1/studycoach/-/settings/integrations)
+## 📁 Struttura Progetto
 
-## Collaborate with your team
+```
+study_coach/
+├── app/                           # Frontend Streamlit
+│   ├── main.py                    # Entry point
+│   └── pages/
+│       ├── login.py               # Login/Register
+│       ├── upload.py              # Gestione esami + PDF
+│       ├── session.py             # Interrogazione socratica
+│       └── history.py             # Storico sessioni
+│
+├── backend/
+│   ├── api/                       # Router FastAPI
+│   │   ├── main.py                # Entry point + CORS
+│   │   ├── auth.py                # /auth/register, /auth/login
+│   │   ├── exams.py               # /exams CRUD + upload PDF
+│   │   └── sessions.py            # /sessions loop socratico + adaptive
+│   │
+│   ├── agents/                    # Multi-agent orchestration
+│   │   ├── ingestor.py            # RAG: indicizzazione PDF
+│   │   ├── quiz_generator.py      # Generazione domande (Agno)
+│   │   ├── socratic_tutor.py      # Loop socratico (Agno)
+│   │   ├── adaptive_engine.py     # Tracking + prioritizzazione
+│   │   ├── report_generator.py    # Markdown + PDF
+│   │   ├── notes_generator.py     # Appunti sintetici
+│   │   ├── prompts/
+│   │   │   ├── quiz_generator_v1.txt
+│   │   │   ├── socratic_tutor_guide_v1.txt
+│   │   │   ├── socratic_tutor_eval_v1.txt
+│   │   │   └── socratic_tutor_contest_v1.txt
+│   │   └── __init__.py
+│   │
+│   ├── db/
+│   │   ├── models.py              # SQLAlchemy ORM (Student, Exam, Session)
+│   │   └── __init__.py
+│   │
+│   ├── models/
+│   │   ├── schemas.py             # Pydantic v2 per API
+│   │   └── __init__.py
+│   │
+│   └── __init__.py
+│
+├── data/
+│   ├── uploads/                   # PDF temporanei
+│   ├── chroma/                    # ChromaDB persistente
+│   └── study_coach.db             # SQLite
+│
+├── reports/                       # Report generati (MD + PDF)
+├── tests/                         # Unit test
+├── .env                           # API key (NOT COMMITTED)
+├── .gitignore                     # Esclude .env, data/, __pycache__
+├── requirements.txt               # Dipendenze Python
+├── pyproject.toml                 # Configurazione Progetto
+├── AGENTS.md                      # Documentazione architettura
+└── README.md                      # Questo file
+```
 
-* [Invite team members and collaborators](https://docs.gitlab.com/user/project/members/)
-* [Create a new merge request](https://docs.gitlab.com/user/project/merge_requests/creating_merge_requests/)
-* [Automatically close issues from merge requests](https://docs.gitlab.com/user/project/issues/managing_issues/#closing-issues-automatically)
-* [Enable merge request approvals](https://docs.gitlab.com/user/project/merge_requests/approvals/)
-* [Set auto-merge](https://docs.gitlab.com/user/project/merge_requests/auto_merge/)
+---
 
-## Test and Deploy
+## 🔧 Configurazione
 
-Use the built-in continuous integration in GitLab.
+### Convezioni Progetto
 
-* [Get started with GitLab CI/CD](https://docs.gitlab.com/ci/quick_start/)
-* [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/user/application_security/sast/)
-* [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/topics/autodevops/requirements/)
-* [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/user/clusters/agent/)
-* [Set up protected environments](https://docs.gitlab.com/ci/environments/protected_environments/)
+- **Naming**: `snake_case` per file/funzioni; `PascalCase` per classi
+- **Agenti**: Un agente per responsabilità (ingestor, quiz_generator, socratic_tutor, adaptive_engine)
+- **Prompt**: File dedicati in `backend/agents/prompts/` versionati
+- **Isolamento dati**: Ogni `(student_id, exam_id)` ha namespace separato in ChromaDB
+- **Segreti**: Tutte in `.env`, mai hardcoded
 
-***
+### Parametri Chiave
 
-# Editing this README
+| Parametro | Default | Descrizione |
+|---|---|---|
+| `DEFAULT_N_QUESTIONS` | 5 | Numero domande per quiz |
+| `DEFAULT_N_CHUNKS` | 5-10 | Chunk RAG per retrieval |
+| `CHUNK_SIZE` | 500 parole | Dimensione chunk testo |
+| `CHUNK_OVERLAP` | 50 parole | Overlap tra chunk |
+| `score_weak_threshold` | 6 | Topic è "debole" se media < 6 |
 
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
+---
 
-## Suggestions for a good README
+## ✅ Testing
 
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
+```bash
+# Unit test (mock LLM e ChromaDB)
+pytest tests/ -v
 
-## Name
-Choose a self-explaining name for your project.
+# Coverage
+pytest tests/ --cov=backend --cov-report=html
 
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
+# Linting
+flake8 backend/ app/ --max-line-length=120
+black backend/ app/ --check
 
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
+# Type checking
+mypy backend/ app/ --ignore-missing-imports
+```
 
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
+---
 
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
+## 📦 Deployment
 
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
+### Docker (opzionale)
+```dockerfile
+FROM python:3.11-slim
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install -r requirements.txt
+COPY . .
+CMD ["streamlit", "run", "app/main.py"]
+```
 
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
+### Produzione
+```bash
+# Install gunicorn
+pip install gunicorn
 
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
+# Run API backend
+gunicorn backend.api.main:app -w 4 -b 0.0.0.0:8000
 
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
+# Run Streamlit in modo produzione
+streamlit run app/main.py --server.port 8501 --server.headless true
+```
 
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
+---
 
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
+## 🐛 Troubleshooting
 
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
+| Problema | Causa | Soluzione |
+|---|---|---|
+| `ModuleNotFoundError: agno` | Dipendenze non installate | `pip install -r requirements.txt` |
+| `GROQ_API_KEY not found` | .env mancante | Crea `.env` con API key |
+| `OperationalError: database is locked` | SQLite concorrente | Usa SQLite con journal mode WAL |
+| `ChromaDB: no embedding function` | Embedding model non trovato | Scarica all-MiniLM-L6-v2 (primo run) |
+| `Streamlit not found` | Python venv non attivato | Attiva venv: `. venv/Scripts/activate` (Windows) |
 
-## License
-For open source projects, say how it is licensed.
+---
 
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+## 📚 Documentazione Aggiuntiva
+
+- **Architettura**: Vedi [AGENTS.md](./AGENTS.md)
+- **Dev Log**: Vedi [study_coach_devlog.md](./study_coach_devlog.md)
+- **API Spec**: `http://localhost:8000/docs` (Swagger)
+
+---
+
+## 📞 Support
+
+Per dubbi, bug o suggerimenti, apri una issue nel repository.
+
+---
+
+## 📄 Licenza
+
+Progetto universitario. Uso libero per scopi didattici e di ricerca.
+
+---
+
+## ✨ Credits
+
+Sviluppato con ❤️ per gli studenti di Programmazione AI — Università del Piemonte Orientale
+
+**Stack**: Agno · Groq · ChromaDB · Streamlit · FastAPI · SQLAlchemy
+

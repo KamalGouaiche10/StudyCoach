@@ -2,7 +2,7 @@
 Quiz Generator Agent — Study Coach
 =====================================
 Usa Agno + Groq (llama-3.3-70b-versatile) per generare N domande
-a risposta aperta basate sul materiale RAG dello studente.
+A risposta aperta basate sul materiale RAG dello studente.
 
 Prompt versionato: backend/agents/prompts/quiz_generator_v1.txt
 """

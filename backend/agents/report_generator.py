@@ -12,11 +12,37 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
+import sys
+import traceback
 
 from fpdf import FPDF
 
 REPORTS_DIR = Path(__file__).parent.parent.parent / "reports"
-REPORTS_DIR.mkdir(exist_ok=True)
+
+
+def _pdf_safe_text(value: object) -> str:
+    """Converte testo in latin-1 sostituendo caratteri non supportati da FPDF core fonts."""
+    text = str(value).replace("—", "-")
+    return text.encode("latin-1", "replace").decode("latin-1")
+
+# ✅ FIX: crea cartella reports con error handling robusto
+try:
+    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    # Verifica che sia scrivibile
+    test_file = REPORTS_DIR / ".write_test"
+    test_file.write_text("test")
+    test_file.unlink()
+except Exception as e:
+    print(f"[ReportGenerator] ⚠️ Errore creazione/verifica cartella reports: {e}", file=sys.stderr)
+    # Fallback a una cartella temporanea
+    import tempfile
+    REPORTS_DIR = Path(tempfile.gettempdir()) / "study_coach_reports"
+    try:
+        REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+        print(f"[ReportGenerator] Fallback a: {REPORTS_DIR}", file=sys.stderr)
+    except Exception as e2:
+        print(f"[ReportGenerator] ❌ Impossibile creare cartella fallback: {e2}", file=sys.stderr)
+        REPORTS_DIR = None
 
 
 # ---------------------------------------------------------------------------
@@ -76,7 +102,7 @@ class _ReportPDF(FPDF):
     def header(self) -> None:
         self.set_font("Helvetica", "B", 10)
         self.set_text_color(80, 80, 80)
-        self.cell(0, 8, "Study Coach — Report Sessione")
+        self.cell(0, 8, "Study Coach - Report Sessione")
         self.ln(4)
         self.set_draw_color(200, 200, 200)
         self.line(10, self.get_y(), 200, self.get_y())
@@ -93,7 +119,7 @@ def _add_section_title(pdf: FPDF, title: str) -> None:
     pdf.set_font("Helvetica", "B", 13)
     pdf.set_text_color(40, 40, 40)
     pdf.ln(4)
-    pdf.cell(0, 8, title)
+    pdf.cell(0, 8, _pdf_safe_text(title))
     pdf.ln(8)
     pdf.set_draw_color(180, 180, 180)
     pdf.line(10, pdf.get_y(), 200, pdf.get_y())
@@ -103,7 +129,7 @@ def _add_section_title(pdf: FPDF, title: str) -> None:
 def _add_body(pdf: FPDF, text: str) -> None:
     pdf.set_font("Helvetica", "", 11)
     pdf.set_text_color(60, 60, 60)
-    pdf.multi_cell(0, 6, text)
+    pdf.multi_cell(0, 6, _pdf_safe_text(text))
     pdf.ln(2)
 
 
@@ -130,11 +156,11 @@ def generate_pdf( report: dict, session_id: int, exam_name: str = "Esame",) -> b
     # Titolo
     pdf.set_font("Helvetica", "B", 18)
     pdf.set_text_color(30, 30, 30)
-    pdf.cell(0, 12, f"Report Sessione — {exam_name}")
+    pdf.cell(0, 12, _pdf_safe_text(f"Report Sessione - {exam_name}"))
     pdf.ln(12)
     pdf.set_font("Helvetica", "", 10)
     pdf.set_text_color(120, 120, 120)
-    pdf.cell(0, 6, f"Generato il {now} | Sessione #{session_id}")
+    pdf.cell(0, 6, _pdf_safe_text(f"Generato il {now} | Sessione #{session_id}"))
     pdf.ln(10)
 
     # Risultato complessivo
@@ -150,9 +176,9 @@ def generate_pdf( report: dict, session_id: int, exam_name: str = "Esame",) -> b
     pdf.ln(14)
     pdf.set_text_color(60, 60, 60)
     pdf.set_font("Helvetica", "", 11)
-    pdf.cell(0, 6, f"Verdetto: {verdict}")
+    pdf.cell(0, 6, _pdf_safe_text(f"Verdetto: {verdict}"))
     pdf.ln(6)
-    pdf.cell(0, 6, f"Domande completate: {n_q}")
+    pdf.cell(0, 6, _pdf_safe_text(f"Domande completate: {n_q}"))
     pdf.ln(10)
 
     # Tabella topic
@@ -173,10 +199,10 @@ def generate_pdf( report: dict, session_id: int, exam_name: str = "Esame",) -> b
             pdf.set_text_color(180, 0, 0)
         else:
             pdf.set_text_color(0, 130, 0)
-        pdf.cell(90, 6, str(t["topic"])[:45], border=1)
+        pdf.cell(90, 6, _pdf_safe_text(str(t["topic"])[:45]), border=1)
         pdf.cell(25, 6, f"{t['avg_score']}/10", border=1, align="C")
         pdf.cell(25, 6, str(t["n_attempts"]), border=1, align="C")
-        pdf.cell(40, 6, stato, border=1, align="C")
+        pdf.cell(40, 6, _pdf_safe_text(stato), border=1, align="C")
         pdf.ln()
 
     pdf.set_text_color(60, 60, 60)
@@ -202,7 +228,12 @@ def generate_pdf( report: dict, session_id: int, exam_name: str = "Esame",) -> b
     _add_section_title(pdf, "Sintesi")
     _add_body(pdf, summary)
 
-    return bytes(pdf.output())
+    out = pdf.output()
+    if isinstance(out, (bytes, bytearray)):
+        return bytes(out)
+    if isinstance(out, str):
+        return out.encode("latin-1", "replace")
+    raise TypeError(f"Tipo output PDF non supportato: {type(out).__name__}")
 
 
 # Salvataggio su disco
@@ -211,18 +242,47 @@ def save_report(report: dict,session_id: int,exam_name: str = "Esame",) -> dict[
     """
     Genera e salva Markdown e PDF su disco.
     Returns: {"md": path_md, "pdf": path_pdf}
+    
+    FIX: gestione errori completa con fallback e logging.
     """
-    student_id = report.get("student_id", 0)
-    exam_id = report.get("exam_id", 0)
-    base_name = f"{student_id}_{exam_id}_{session_id}"
+    try:
+        if REPORTS_DIR is None:
+            print("[ReportGenerator] ❌ Cartella reports non disponibile, fallback fallito", file=sys.stderr)
+            return {"md": "", "pdf": ""}
+        
+        student_id = report.get("student_id", 0)
+        exam_id = report.get("exam_id", 0)
+        base_name = f"{student_id}_{exam_id}_{session_id}"
 
-    md_path = REPORTS_DIR / f"{base_name}.md"
-    pdf_path = REPORTS_DIR / f"{base_name}.pdf"
+        md_path = REPORTS_DIR / f"{base_name}.md"
+        pdf_path = REPORTS_DIR / f"{base_name}.pdf"
 
-    md_path.write_text(generate_markdown(report, session_id, exam_name), encoding="utf-8")
-    pdf_path.write_bytes(generate_pdf(report, session_id, exam_name))
+        # Genera Markdown
+        try:
+            md_content = generate_markdown(report, session_id, exam_name)
+            md_path.write_text(md_content, encoding="utf-8")
+            print(f"[ReportGenerator] ✅ Salvato Markdown: {md_path}")
+        except Exception as md_e:
+            print(f"[ReportGenerator] ⚠️ Errore salvataggio Markdown: {md_e}", file=sys.stderr)
+            print(traceback.format_exc(), file=sys.stderr)
+            md_path = None
 
-    print(f"[ReportGenerator] Salvato: {md_path}")
-    print(f"[ReportGenerator] Salvato: {pdf_path}")
+        # Genera PDF
+        try:
+            pdf_bytes = generate_pdf(report, session_id, exam_name)
+            pdf_path.write_bytes(pdf_bytes)
+            print(f"[ReportGenerator] ✅ Salvato PDF: {pdf_path}")
+        except Exception as pdf_e:
+            print(f"[ReportGenerator] ⚠️ Errore salvataggio PDF: {pdf_e}", file=sys.stderr)
+            print(traceback.format_exc(), file=sys.stderr)
+            pdf_path = None
 
-    return {"md": str(md_path), "pdf": str(pdf_path)}
+        return {
+            "md": str(md_path) if md_path else "",
+            "pdf": str(pdf_path) if pdf_path else ""
+        }
+    
+    except Exception as e:
+        print(f"[ReportGenerator] ❌ Errore critico in save_report: {e}", file=sys.stderr)
+        print(traceback.format_exc(), file=sys.stderr)
+        return {"md": "", "pdf": ""}

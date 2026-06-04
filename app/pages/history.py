@@ -5,11 +5,104 @@ pages/history.py — Storico sessioni per esame
 import streamlit as st
 import json
 import sys
+import logging
+from json import JSONDecodeError
 from pathlib import Path
+from datetime import datetime, timezone
+from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from backend.db.models import SessionLocal, Session as DbSession, Exam
+from backend.agents.report_generator import save_report
+from sqlalchemy.exc import SQLAlchemyError
+
+logger = logging.getLogger(__name__)
+
+
+def _rebuild_report_payload(sess: DbSession) -> Optional[dict]:
+    """Ricostruisce un payload report minimo partendo da qa_log per rigenerare il PDF."""
+    if not sess.qa_log:
+        return None
+    try:
+        attempts = json.loads(sess.qa_log)
+    except (TypeError, JSONDecodeError):
+        return None
+
+    scored_attempts: list[dict] = []
+    for a in attempts if isinstance(attempts, list) else []:
+        if not isinstance(a, dict):
+            continue
+        score = a.get("final_score")
+        if isinstance(score, (int, float)):
+            scored_attempts.append(a)
+
+    if not scored_attempts:
+        return None
+
+    topic_scores: dict[str, list[float]] = {}
+    for a in scored_attempts:
+        topic = str(a.get("topic_hint") or "generale").strip() or "generale"
+        topic_scores.setdefault(topic, []).append(float(a["final_score"]))
+
+    breakdown = []
+    weak_topics = []
+    strong_topics = []
+    for topic, vals in topic_scores.items():
+        avg_topic = round(sum(vals) / len(vals), 1)
+        is_weak = avg_topic < 6
+        breakdown.append(
+            {
+                "topic": topic,
+                "avg_score": avg_topic,
+                "n_attempts": len(vals),
+                "is_weak": is_weak,
+            }
+        )
+        if is_weak:
+            weak_topics.append(topic)
+        if avg_topic >= 8:
+            strong_topics.append(topic)
+
+    overall_avg = round(sum(float(a["final_score"]) for a in scored_attempts) / len(scored_attempts), 1)
+    return {
+        "student_id": int(st.session_state.get("student_id", 0)),
+        "exam_id": int(sess.exam_id),
+        "overall_avg": overall_avg,
+        "n_questions_answered": len(scored_attempts),
+        "weak_topics": weak_topics,
+        "strong_topics": strong_topics,
+        "topic_breakdown": breakdown,
+        "summary": "Report rigenerato automaticamente dallo storico sessione.",
+    }
+
+
+def _regenerate_pdf_report(session_id: int, exam_name: str) -> bool:
+    """Rigenera report PDF per una sessione completata senza file report_path valido."""
+    db = SessionLocal()
+    try:
+        sess = db.query(DbSession).filter(DbSession.id == session_id).first()
+        if not sess or sess.score_total is None:
+            return False
+
+        report_payload = _rebuild_report_payload(sess)
+        if not report_payload:
+            return False
+
+        paths = save_report(report_payload, session_id=session_id, exam_name=exam_name)
+        pdf_path = str(paths.get("pdf") or "")
+        if not pdf_path or not Path(pdf_path).exists():
+            return False
+
+        sess.report_path = pdf_path
+        db.commit()
+        return True
+    except SQLAlchemyError:
+        logger.exception("Failed to regenerate report for session id=%s", session_id)
+        db.rollback()
+        return False
+    finally:
+        db.close()
 
 
 # ── Guards ─────────────────────────────────────────────────────────────────
@@ -50,23 +143,61 @@ def _delete_session(session_id: int):
         if sess:
             db.delete(sess)
             db.commit()
-    except Exception:
+    except SQLAlchemyError:
+        # rollback on DB-specific errors and log for diagnostics
+        logger.exception("Failed to delete session id=%s", session_id)
         db.rollback()
     finally:
         db.close()
+
+
+def _close_session(session_id: int):
+    """
+    FIX — Chiude manualmente una sessione orfana impostando ended_at=now.
+    Usato dal bottone 'Segna come conclusa' nella history per le sessioni
+    che appaiono ancora 'In corso' perché ended_at è NULL.
+    """
+    db = SessionLocal()
+    try:
+        sess = db.query(DbSession).filter(DbSession.id == session_id).first()
+        if sess and sess.ended_at is None:
+            sess.ended_at = datetime.now(timezone.utc)
+            db.commit()
+    except SQLAlchemyError:
+        logger.exception("Failed to close session id=%s", session_id)
+        db.rollback()
+    finally:
+        db.close()
+
+
+def _is_orphan(sess: DbSession) -> bool:
+    """
+    FIX — Determina se una sessione è orfana (avviata ma mai completata).
+    Una sessione è orfana se:
+      - ended_at è NULL (non è mai stata chiusa correttamente)
+    Non usiamo una soglia temporale: se ended_at è NULL la sessione
+    non è mai stata completata, indipendentemente da quando è iniziata.
+    """
+    return sess.ended_at is None
 
 
 def _format_duration(started_at, ended_at) -> str:
     if not started_at or not ended_at:
         return "—"
     try:
-        delta = ended_at - started_at
+        # Normalizza entrambi i datetime come UTC-aware per evitare errori
+        # di confronto tra datetime naive e aware (bug comune con SQLite)
+        s = started_at if started_at.tzinfo else started_at.replace(tzinfo=timezone.utc)
+        e = ended_at if ended_at.tzinfo else ended_at.replace(tzinfo=timezone.utc)
+        delta = e - s
         minutes = int(delta.total_seconds() // 60)
         seconds = int(delta.total_seconds() % 60)
         if minutes == 0:
             return f"{seconds}s"
         return f"{minutes}m {seconds}s"
-    except Exception:
+    except (AttributeError, TypeError, ValueError) as e:
+        # Normalizziamo errori legati a tipi non datetime o valori inattesi
+        logger.debug("_format_duration error: %s", e)
         return "—"
 
 
@@ -123,7 +254,7 @@ def _render_session_detail(sess: DbSession):
         return
     try:
         attempts = json.loads(sess.qa_log)
-    except Exception:
+    except (TypeError, JSONDecodeError):
         st.warning("Impossibile caricare il log della sessione.")
         return
 
@@ -252,7 +383,7 @@ def render():
                 _go_to_session(selected_exam)
         return
 
-    # ── Statistiche aggregate ──────────────────────────────────────────────
+    # ── Statistiche aggregate — solo sessioni completate ───────────────────
     completed = [s for s in sessions if s.score_total is not None]
     if completed:
         avg_all = round(sum(s.score_total for s in completed) / len(completed), 1)
@@ -280,6 +411,7 @@ def render():
     for sess in sessions:
         score     = sess.score_total
         has_score = score is not None
+        orphan    = _is_orphan(sess)           # FIX: usa ended_at, non score
         duration  = _format_duration(sess.started_at, sess.ended_at)
         date_str  = sess.started_at.strftime("%d/%m/%Y %H:%M") if sess.started_at else "—"
 
@@ -288,18 +420,21 @@ def render():
             score_str     = f"{score}/10"
             score_color   = _score_color(score)
             border_color  = score_color
-        else:
+        elif orphan:
+            # FIX: sessione orfana — non completata, nessun voto
             verdict_icon  = "⏳"
-            score_str     = "In corso"
+            score_str     = "Non completata"
+            score_color   = "#6b7280"
+            border_color  = "#252a36"
+        else:
+            # Sessione chiusa (ended_at presente) ma senza score (edge case)
+            verdict_icon  = "⚠️"
+            score_str     = "Senza voto"
             score_color   = "#6b7280"
             border_color  = "#252a36"
 
         has_report = bool(sess.report_path and Path(sess.report_path).exists())
 
-        # ── FIX: card HTML separata dai widget Streamlit ──────────────────
-        # In precedenza la card e i bottoni erano mescolati in un unico blocco
-        # che Streamlit non riusciva a renderizzare correttamente quando
-        # has_score=False, lasciando la riga visivamente vuota.
         st.markdown(f"""
         <div class="sc-card" style="border-left:3px solid {border_color}; margin-bottom:0.25rem;">
             <div style="display:flex; justify-content:space-between; align-items:center;">
@@ -317,18 +452,18 @@ def render():
         </div>
         """, unsafe_allow_html=True)
 
-        # ── Bottoni sempre renderizzati fuori dall'HTML ───────────────────
-        col_detail, col_notes, col_pdf, col_del = st.columns([2, 1.5, 1.5, 1])
+        # ── Bottoni ───────────────────────────────────────────────────────
+        col_detail, col_notes, col_pdf, col_close, col_del = st.columns([2, 1.2, 1.2, 1.5, 1])
 
         with col_detail:
             if sess.qa_log:
                 with st.expander("📜 Dettaglio Q&A", expanded=False):
                     _render_session_detail(sess)
-            else:
-                # FIX: sessione "In corso" senza qa_log — mostra placeholder
+            elif orphan and not sess.qa_log:
+                # FIX: mostra il messaggio solo se veramente orfana E senza Q&A
                 st.markdown(
                     "<p style='color:#6b7280; font-size:0.82rem; margin:0.4rem 0;'>"
-                    "Sessione non ancora completata.</p>",
+                    "Sessione non completata — nessun Q&A registrato.</p>",
                     unsafe_allow_html=True,
                 )
 
@@ -342,23 +477,44 @@ def render():
         with col_pdf:
             if has_report:
                 with open(sess.report_path, "rb") as f:
+                    # Leggiamo i bytes per soddisfare i type hints di Streamlit
+                    data = f.read()
                     st.download_button(
                         "📥 Report PDF",
-                        data=f,
+                        data=data,
                         file_name=f"report_sessione_{sess.id}.pdf",
                         mime="application/pdf",
                         key=f"dl_{sess.id}",
                         use_container_width=True,
                     )
+            elif has_score and sess.qa_log:
+                if st.button("🛠 Genera PDF", key=f"regen_pdf_{sess.id}", use_container_width=True,
+                             help="Rigenera il report PDF se manca il file"):
+                    ok = _regenerate_pdf_report(sess.id, selected_exam.name)
+                    if ok:
+                        st.success("PDF rigenerato con successo.")
+                    else:
+                        st.error("Impossibile rigenerare il PDF per questa sessione.")
+                    st.rerun()
+
+        with col_close:
+            # FIX: bottone per chiudere manualmente sessioni orfane
+            # che appaiono "In corso" a causa di ended_at=NULL.
+            # Non elimina la sessione, imposta solo ended_at=now.
+            if orphan:
+                if st.button("✅ Segna conclusa", key=f"close_sess_{sess.id}",
+                             use_container_width=True,
+                             help="Chiude questa sessione incompletata senza eliminarla"):
+                    _close_session(sess.id)
+                    st.rerun()
 
         with col_del:
-            # FIX: il bottone "Elimina" era visibile solo per sessioni senza
-            # score, ma una sessione "In corso" può non avere qa_log né score.
-            # Ora il bottone compare per qualsiasi sessione incompleta
-            # (ended_at assente), non solo per quelle senza score.
-            if sess.ended_at is None:
-                if st.button("🗑 Elimina", key=f"del_sess_{sess.id}", use_container_width=True,
-                             help="Elimina sessione incompleta"):
+            # FIX: il bottone Elimina era condizionato a ended_at is None,
+            # ma ora usiamo orphan (stessa cosa) per coerenza e chiarezza.
+            # Appare solo per sessioni non completate.
+            if orphan:
+                if st.button("🗑", key=f"del_sess_{sess.id}", use_container_width=True,
+                             help="Elimina sessione non completata"):
                     _delete_session(sess.id)
                     st.rerun()
 
@@ -387,10 +543,17 @@ def _render_notes_panel(sess: DbSession):
         try:
             from backend.agents.notes_generator import generate_notes_from_log
             attempts = json.loads(sess.qa_log)
+        except (ImportError, TypeError, JSONDecodeError) as e:
+            st.error(f"Errore generazione appunti: {e}")
+            return
+
+        try:
             with st.spinner("Generazione appunti sintetici in corso..."):
                 notes = generate_notes_from_log(attempts)
             st.session_state[cache_key] = notes
         except Exception as e:
+            # The generator may raise various errors; surface to user and log
+            logger.exception("notes_generator failed for session %s: %s", sess.id, e)
             st.error(f"Errore generazione appunti: {e}")
             return
 
@@ -398,9 +561,6 @@ def _render_notes_panel(sess: DbSession):
     if not notes:
         return
 
-    # FIX: prima il testo degli appunti veniva interpolato dentro unsafe_allow_html
-    # come stringa grezza, rompendo il Markdown (bullet, grassetto, titoli).
-    # Ora la card del titolo è HTML, il contenuto è renderizzato via st.markdown nativo.
     st.markdown(f"""
     <div style="background:#0f1319; border:1px solid #252a36; border-radius:10px;
                 padding:1.25rem 1.5rem 0.5rem; margin:0.5rem 0 0.25rem;">
@@ -410,7 +570,6 @@ def _render_notes_panel(sess: DbSession):
         </div>
     </div>
     """, unsafe_allow_html=True)
-    # Il contenuto Markdown viene reso da Streamlit, non da HTML inline
     st.markdown(notes)
 
 

@@ -6,6 +6,7 @@ import streamlit as st
 import hashlib
 import sys
 from pathlib import Path
+from typing import Optional
 
 # Aggiunge il root al path per import backend
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -19,10 +20,15 @@ def _hash_password(pwd: str) -> str:
     return hashlib.sha256(pwd.encode()).hexdigest()
 
 
-def _login(username: str, password: str) -> tuple[bool, str]:
+def _login(username: Optional[str], password: Optional[str]) -> tuple[bool, str]:
     """Verifica credenziali. Ritorna (successo, messaggio)."""
-    if not username.strip() or not password:
+    # streamlit text_input can return None in some type stubs; normalizziamo
+    username = (username or "").strip()
+    password = password or ""
+
+    if not username or not password:
         return False, "Compila tutti i campi."
+
     db = SessionLocal()
     try:
         student = db.query(Student).filter(Student.username == username.strip()).first()
@@ -39,11 +45,16 @@ def _login(username: str, password: str) -> tuple[bool, str]:
         db.close()
 
 
-def _register(username: str, password: str, confirm: str) -> tuple[bool, str]:
+def _register(username: Optional[str], password: Optional[str], confirm: Optional[str]) -> tuple[bool, str]:
     """Crea un nuovo account. Ritorna (successo, messaggio)."""
-    if not username.strip() or not password or not confirm:
+    # Normalizza possibili None provenienti da Streamlit
+    username = (username or "").strip()
+    password = password or ""
+    confirm = confirm or ""
+
+    if not username or not password or not confirm:
         return False, "Compila tutti i campi."
-    if len(username.strip()) < 3:
+    if len(username) < 3:
         return False, "Username troppo corto (min 3 caratteri)."
     if len(password) < 6:
         return False, "Password troppo corta (min 6 caratteri)."
@@ -80,7 +91,7 @@ def render():
     init_db()  # crea tabelle se non esistono
 
     # Se già autenticato, reindirizza
-    if st.session_state.authenticated:
+    if st.session_state.get("authenticated"):
         st.session_state.current_page = "upload"
         st.rerun()
 

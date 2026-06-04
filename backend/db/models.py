@@ -1,8 +1,19 @@
 from datetime import datetime, timezone
+from pathlib import Path
 from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, ForeignKey, Text
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 
 Base = declarative_base()
+
+# ── FIX: path assoluto basato sulla posizione del file ─────────────────────
+# Con un path relativo ("./data/study_coach.db") SQLite dipende dalla
+# working directory di chi avvia lo script. Quando si esegue app/main.py
+# direttamente (non con `streamlit run`) la cwd non è la root del progetto
+# e la cartella data/ non viene trovata → OperationalError.
+# Usando Path(__file__) il path è sempre relativo al file models.py,
+# indipendentemente da dove viene lanciato il processo.
+_DB_DIR = Path(__file__).parent.parent.parent / "data"
+_DB_DIR.mkdir(parents=True, exist_ok=True)
 
 def now_utc():
     return datetime.now(timezone.utc)
@@ -66,7 +77,7 @@ class Session(Base):
     report_path = Column(String(200), nullable=True)
     exam        = relationship("Exam", back_populates="sessions")
 
-engine = create_engine("sqlite:///./data/study_coach.db", echo=False)
+engine = create_engine(f"sqlite:///{_DB_DIR / 'study_coach.db'}", echo=False)
 
 def init_db():
     Base.metadata.create_all(engine)

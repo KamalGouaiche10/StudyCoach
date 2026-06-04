@@ -4,12 +4,18 @@ pages/upload.py — Gestione esami e upload PDF
 
 import streamlit as st
 import sys
+import logging
 from pathlib import Path
+from datetime import datetime, timezone
+from typing import Iterable
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from backend.db.models import SessionLocal, Exam, Session as DbSession
 from backend.agents.ingestor import ingest_pdf, delete_exam_collection
+from sqlalchemy.exc import SQLAlchemyError
+
+logger = logging.getLogger(__name__)
 
 
 # ── Guards ─────────────────────────────────────────────────────────────────
@@ -33,7 +39,7 @@ def _get_exams(student_id: int) -> list:
 def _create_exam(student_id: int, name: str) -> Exam:
     db = SessionLocal()
     try:
-        exam = Exam(student_id=student_id, name=name.strip())
+        exam = Exam(student_id=student_id, name=(name or "").strip())
         db.add(exam)
         db.commit()
         db.refresh(exam)
@@ -49,11 +55,20 @@ def _delete_exam(exam_id: int, student_id: int):
         if exam:
             db.delete(exam)
             db.commit()
-        delete_exam_collection(student_id, exam_id)
-    except Exception:
+    except SQLAlchemyError:
+        logger.exception("Failed to delete exam id=%s for student_id=%s", exam_id, student_id)
         db.rollback()
     finally:
         db.close()
+
+    # Delete the ChromaDB collection; this can raise ValueError which
+    # `delete_exam_collection` already handles, but log unexpected errors.
+    try:
+        delete_exam_collection(student_id, exam_id)
+    except ValueError as e:
+        # delete_exam_collection already ignores ValueError when collection
+        # does not exist; log for diagnostics.
+        logger.debug("delete_exam_collection: %s", e)
 
 
 def _session_count(exam_id: int) -> int:
@@ -74,6 +89,33 @@ def _avg_score(exam_id: int) -> float | None:
         if not sessions:
             return None
         return round(sum(s.score_total for s in sessions) / len(sessions), 1)
+    finally:
+        db.close()
+
+
+def _close_orphan_sessions(exam_id: int) -> int:
+    """
+    FIX — Sessioni 'In corso': chiude tutte le sessioni senza ended_at
+    per questo esame prima di avviarne una nuova.
+    Le sessioni orfane si creano quando l'utente chiude il browser o
+    naviga via senza completare la sessione.
+    Ritorna il numero di sessioni chiuse.
+    """
+    db = SessionLocal()
+    try:
+        orphans = db.query(DbSession).filter(
+            DbSession.exam_id == exam_id,
+            DbSession.ended_at.is_(None),
+        ).all()
+        now = datetime.now(timezone.utc)
+        for s in orphans:
+            s.ended_at = now
+        db.commit()
+        return len(orphans)
+    except SQLAlchemyError:
+        logger.exception("Failed to close orphan sessions for exam_id=%s", exam_id)
+        db.rollback()
+        return 0
     finally:
         db.close()
 
@@ -128,11 +170,12 @@ def render():
             create_clicked = st.button("Crea", type="primary", use_container_width=True)
 
         if create_clicked:
-            if not exam_name.strip():
+            exam_name_val = (exam_name or "").strip()
+            if not exam_name_val:
                 st.error("Inserisci un nome per l'esame.")
             else:
-                _create_exam(student_id, exam_name)
-                st.success(f"Esame «{exam_name}» creato!")
+                _create_exam(student_id, exam_name_val)
+                st.success(f"Esame «{exam_name_val}» creato!")
                 st.rerun()
 
     # ── LISTA ESAMI ────────────────────────────────────────────────────────
@@ -181,37 +224,55 @@ def render():
                     key=f"pdf_{exam.id}",
                     label_visibility="collapsed",
                 )
+
+                # Streamlit type stubs allow UploadedFile | list[UploadedFile];
+                # normalizziamo in una lista per gestire entrambi i casi.
                 if uploaded:
+                    files: Iterable = uploaded if isinstance(uploaded, list) else [uploaded]
                     upload_dir = Path(__file__).parent.parent.parent / "data" / "uploads"
                     upload_dir.mkdir(parents=True, exist_ok=True)
-                    pdf_path = upload_dir / f"s{student_id}_e{exam.id}_{uploaded.name}"
-                    pdf_path.write_bytes(uploaded.read())
-                    with st.spinner("Indicizzazione PDF in corso..."):
+                    for file_obj in files:
                         try:
-                            stats = ingest_pdf(str(pdf_path), student_id, exam.id)
-                            st.success(f"✅ {stats['chunks']} chunk indicizzati da {stats['pages']} pagine")
-                        except Exception as e:
-                            st.error(f"Errore indicizzazione: {e}")
+                            pdf_path = upload_dir / f"s{student_id}_e{exam.id}_{file_obj.name}"
+                            pdf_path.write_bytes(file_obj.read())
+                        except (OSError, AttributeError, TypeError) as e:
+                            logger.exception("Failed to save uploaded PDF for exam %s: %s", exam.id, e)
+                            st.error("Errore salvataggio file.")
+                            continue
+
+                        with st.spinner("Indicizzazione PDF in corso..."):
+                            try:
+                                stats = ingest_pdf(str(pdf_path), student_id, exam.id)
+                                st.success(f"✅ {stats['chunks']} chunk indicizzati da {stats['pages']} pagine")
+                            except (FileNotFoundError, ValueError) as e:
+                                st.error(f"Errore indicizzazione: {e}")
+                            except Exception as e:
+                                logger.exception("Unexpected error during ingest_pdf for %s: %s", pdf_path, e)
+                                st.error(f"Errore indicizzazione: {e}")
 
             with col_start:
                 if st.button("▶ Avvia sessione", key=f"start_{exam.id}", type="primary", use_container_width=True):
-                    st.session_state.current_exam  = {"id": exam.id, "name": exam.name}
-                    st.session_state.current_page  = "session"
-                    st.session_state.quiz_result   = None
+                    # FIX — chiude le sessioni orfane prima di aprirne una nuova
+                    # così in history non appaiono più come "In corso"
+                    closed = _close_orphan_sessions(exam.id)
+                    if closed:
+                        print(f"[upload.py] Chiuse {closed} sessioni orfane per exam_id={exam.id}")
+
+                    st.session_state.current_exam    = {"id": exam.id, "name": exam.name}
+                    st.session_state.current_page    = "session"
+                    st.session_state.quiz_result     = None
                     st.session_state.adaptive_engine = None
-                    st.session_state.tutor         = None
-                    st.session_state.current_q_idx = 0
-                    st.session_state.tutor_state   = "idle"
+                    st.session_state.tutor           = None
+                    st.session_state.current_q_idx   = 0
+                    st.session_state.tutor_state     = "idle"
                     st.session_state.current_session = None
                     st.rerun()
 
             with col_notes:
-                # Bottone per generare appunti sintetici dal materiale RAG
                 if st.button("📋 Genera appunti", key=f"notes_{exam.id}", use_container_width=True,
                              help="Genera appunti sintetici dal materiale caricato"):
                     st.session_state[f"show_notes_{exam.id}"] = not st.session_state.get(f"show_notes_{exam.id}", False)
                     if st.session_state[f"show_notes_{exam.id}"]:
-                        # Invalida cache per rigenerare
                         st.session_state.pop(f"_notes_cache_exam_{exam.id}", None)
                     st.rerun()
 
@@ -241,6 +302,12 @@ def _render_notes_panel(exam: Exam, student_id: int):
     if cache_key not in st.session_state:
         try:
             from backend.agents.notes_generator import generate_notes
+        except ImportError as e:
+            logger.exception("notes_generator import failed: %s", e)
+            st.error("Modulo per generare appunti non disponibile.")
+            return
+
+        try:
             with st.spinner(f"Generazione appunti per «{exam.name}»..."):
                 notes = generate_notes(
                     student_id=student_id,
@@ -253,6 +320,7 @@ def _render_notes_panel(exam: Exam, student_id: int):
             st.warning(f"⚠️ {e}")
             return
         except Exception as e:
+            logger.exception("generate_notes failed for exam %s: %s", exam.id, e)
             st.error(f"Errore generazione appunti: {e}")
             return
 
@@ -270,8 +338,6 @@ def _render_notes_panel(exam: Exam, student_id: int):
     </div>
     """, unsafe_allow_html=True)
 
-    # Usiamo st.markdown nativo per il contenuto Markdown degli appunti
-    # (non unsafe_allow_html) così intestazioni e bullet vengono renderizzati correttamente
     st.markdown(notes)
 
     col_dl, _ = st.columns([1, 3])

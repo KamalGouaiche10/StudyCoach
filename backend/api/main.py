@@ -9,6 +9,7 @@ Docs interattive:
     http://localhost:8000/redoc  (ReDoc)
 """
 
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -21,6 +22,14 @@ from backend.db.models import init_db
 # Inizializzazione app
 # ---------------------------------------------------------------------------
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Inizializza risorse all'avvio dell'applicazione."""
+    init_db()
+    print("[StudyCoach API] Database inizializzato. Server pronto.")
+    yield
+
+
 app = FastAPI(
     title="Study Coach API",
     description=(
@@ -31,6 +40,7 @@ app = FastAPI(
     version="1.0.0",
     docs_url="/docs",
     redoc_url="/redoc",
+    lifespan=lifespan,
 )
 
 # ---------------------------------------------------------------------------
@@ -38,22 +48,13 @@ app = FastAPI(
 # ---------------------------------------------------------------------------
 
 app.add_middleware(
-    CORSMiddleware,
+    CORSMiddleware,  # type: ignore[arg-type]
     allow_origins=["http://localhost:8501", "http://127.0.0.1:8501"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ---------------------------------------------------------------------------
-# Startup
-# ---------------------------------------------------------------------------
-
-@app.on_event("startup")
-def on_startup() -> None:
-    """Crea le tabelle DB se non esistono."""
-    init_db()
-    print("[StudyCoach API] Database inizializzato. Server pronto.")
 
 
 # ---------------------------------------------------------------------------

@@ -7,7 +7,6 @@ Endpoint:
   POST   /exams/{exam_id}/ingest    → upload e indicizzazione PDF
 """
 
-import shutil
 from pathlib import Path
 
 from fastapi import APIRouter, File, HTTPException, Query, UploadFile, status
@@ -20,6 +19,8 @@ from backend.models.schemas import (
     ExamResponse,
     IngestResponse,
 )
+
+from sqlalchemy.exc import SQLAlchemyError
 
 router = APIRouter(prefix="/exams", tags=["exams"])
 
@@ -120,7 +121,7 @@ def create_exam(
             n_sessions=0,
             avg_score=None,
         )
-    except Exception as exc:
+    except SQLAlchemyError as exc:
         db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -158,7 +159,7 @@ def delete_exam(
         db.commit()
     except HTTPException:
         raise
-    except Exception as exc:
+    except SQLAlchemyError as exc:
         db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -202,9 +203,11 @@ async def ingest_pdf_endpoint(
     pdf_path = UPLOAD_DIR / safe_name
 
     try:
+        # FastAPI UploadFile supports async .read(); leggiamo i bytes
+        content = await file.read()
         with pdf_path.open("wb") as dest:
-            shutil.copyfileobj(file.file, dest)
-    except Exception as exc:
+            dest.write(content)
+    except OSError as exc:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Errore salvataggio file: {exc}",
