@@ -2,20 +2,21 @@
 pages/history.py — Storico sessioni per esame
 """
 
-import streamlit as st
 import json
-import sys
 import logging
+import sys
+from datetime import datetime, timezone
 from json import JSONDecodeError
 from pathlib import Path
-from datetime import datetime, timezone
 from typing import Optional
+
+import streamlit as st
+from sqlalchemy.exc import SQLAlchemyError
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from backend.db.models import SessionLocal, Session as DbSession, Exam
-from backend.agents.report_generator import save_report
-from sqlalchemy.exc import SQLAlchemyError
+from backend.agents.report_generator import save_report # pylint: disable=wrong-import-position
+from backend.db.models import Exam, SessionLocal, Session as DbSession # pylint: disable=wrong-import-position
 
 logger = logging.getLogger(__name__)
 
@@ -551,7 +552,7 @@ def _render_notes_panel(sess: DbSession):
             with st.spinner("Generazione appunti sintetici in corso..."):
                 notes = generate_notes_from_log(attempts)
             st.session_state[cache_key] = notes
-        except Exception as e:
+        except Exception as e: # pylint: disable=broad-exception-caught
             # The generator may raise various errors; surface to user and log
             logger.exception("notes_generator failed for session %s: %s", sess.id, e)
             st.error(f"Errore generazione appunti: {e}")

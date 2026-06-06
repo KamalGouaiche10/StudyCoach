@@ -3,20 +3,21 @@ pages/session.py — Sessione attiva di studio socratico
 Loop: genera quiz → per ogni domanda → risposta1 → guida → risposta2 → valutazione → (contestazione) → prossima
 """
 
-import streamlit as st
 import json
 import sys
-from pathlib import Path
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
+
+import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from backend.db.models import SessionLocal, Session as DbSession
-from backend.agents.quiz_generator import generate_quiz
-from backend.agents.socratic_tutor import SocraticTutor, QuestionAttempt
-from backend.agents.adaptive_engine import AdaptiveEngine
-from backend.agents.report_generator import save_report
+from backend.agents.adaptive_engine import AdaptiveEngine # pylint: disable=wrong-import-position
+from backend.agents.quiz_generator import generate_quiz # pylint: disable=wrong-import-position
+from backend.agents.report_generator import save_report # pylint: disable=wrong-import-position
+from backend.agents.socratic_tutor import QuestionAttempt, SocraticTutor # pylint: disable=wrong-import-position
+from backend.db.models import SessionLocal, Session as DbSession # pylint: disable=wrong-import-position
 
 
 # ── Guards ─────────────────────────────────────────────────────────────────
@@ -126,7 +127,7 @@ def _mark_session_interrupted(sess: dict) -> None:
             if attempts:
                 db_sess.qa_log = json.dumps(attempts, ensure_ascii=False)
             db.commit()
-    except Exception as e:
+    except Exception as e: # pylint: disable=broad-exception-caught
         db.rollback()
         print(f"[session.py] Errore _mark_session_interrupted: {e}")
     finally:
@@ -227,7 +228,7 @@ def _save_session(
         db.commit()
         return str(sess.report_path) if sess.report_path else None
 
-    except Exception as e:
+    except Exception as e: # pylint: disable=broad-exception-caught
         db.rollback()
         import traceback
         st.error(f"Errore salvataggio sessione: {type(e).__name__}: {e}")
@@ -253,7 +254,7 @@ def _render_quiz_generation() -> None:
     </div>
     """, unsafe_allow_html=True)
 
-    col_l, col_c, col_r = st.columns([1, 2, 1])
+    _l, col_c, _r = st.columns([1, 2, 1])
     with col_c:
         n_q: int = st.slider("Numero di domande", min_value=3, max_value=10, value=5, key="n_questions_slider")
         st.markdown("<div style='height:0.75rem'></div>", unsafe_allow_html=True)
@@ -301,7 +302,7 @@ def _render_quiz_generation() -> None:
                 except ValueError as e:
                     st.error(f"⚠️ {e}")
                     st.info("Assicurati di aver caricato il PDF dell'esame prima di avviare la sessione.")
-                except Exception as e:
+                except Exception as e: # pylint: disable=broad-exception-caught
                     st.error(f"Errore inatteso: {e}")
 
 

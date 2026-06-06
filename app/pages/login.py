@@ -2,16 +2,17 @@
 pages/login.py — Login e Registrazione
 """
 
-import streamlit as st
 import hashlib
 import sys
 from pathlib import Path
 from typing import Optional
 
+import streamlit as st
+
 # Aggiunge il root al path per import backend
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from backend.db.models import SessionLocal, Student, init_db
+from backend.db.models import SessionLocal, Student, init_db # pylint: disable=wrong-import-position
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
@@ -78,7 +79,7 @@ def _register(username: Optional[str], password: Optional[str], confirm: Optiona
         st.session_state.username      = student.username
         st.session_state.current_page  = "upload"
         return True, "ok"
-    except Exception as e:
+    except Exception as e: # pylint: disable=broad-exception-caught
         db.rollback()
         return False, f"Errore database: {e}"
     finally:

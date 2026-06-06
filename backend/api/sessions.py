@@ -23,7 +23,7 @@ from fastapi import APIRouter, HTTPException, Query, status
 from backend.agents.adaptive_engine import AdaptiveEngine
 from backend.agents.quiz_generator import generate_quiz
 from backend.agents.report_generator import save_report
-from backend.agents.socratic_tutor import SocraticTutor, TurnState
+from backend.agents.socratic_tutor import SocraticTutor
 from backend.db.models import Session as DbSession
 from backend.db.models import SessionLocal
 from backend.models.schemas import (
@@ -118,7 +118,7 @@ def create_session(
             exam_id=payload.exam_id,
         )
         return _session_to_response(sess)
-    except Exception as exc:
+    except Exception as exc: # pylint: disable=broad-exception-caught
         db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -161,7 +161,7 @@ def generate_session_quiz(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=str(exc),
         ) from exc
-    except Exception as exc:
+    except Exception as exc: # pylint: disable=broad-exception-caught
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Errore generazione quiz: {exc}",
@@ -240,7 +240,7 @@ def tutor_answer1(session_id: int, payload: Answer1Request) -> Answer1Response:
         data = tutor.submit_answer_1(payload.answer)
     except RuntimeError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
-    except Exception as exc:
+    except Exception as exc: # pylint: disable=broad-exception-caught
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Errore generazione domanda guida: {exc}",
@@ -274,7 +274,7 @@ def tutor_answer2(session_id: int, payload: Answer2Request) -> Answer2Response:
         data = tutor.submit_answer_2(payload.answer)
     except RuntimeError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
-    except Exception as exc:
+    except Exception as exc: # pylint: disable=broad-exception-caught
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Errore valutazione: {exc}",
@@ -311,7 +311,7 @@ def tutor_contest(session_id: int, payload: ContestRequest) -> ContestResponse:
         data = tutor.submit_contestation(payload.argumentation)
     except RuntimeError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
-    except Exception as exc:
+    except Exception as exc: # pylint: disable=broad-exception-caught
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Errore rivalutazione: {exc}",
@@ -394,7 +394,7 @@ def _append_attempt_to_log(session_id: int, attempt_dict: dict) -> None:
         existing.append(attempt_dict)
         sess.qa_log = json.dumps(existing, ensure_ascii=False)
         db.commit()
-    except Exception as exc:
+    except Exception as exc: # pylint: disable=broad-exception-caught
         db.rollback()
         print(f"[sessions.py] Errore append qa_log: {exc}")
     finally:
@@ -474,7 +474,7 @@ def close_session(session_id: int, payload: SessionCloseRequest) -> SessionRepor
             sess.score_total = report["overall_avg"]
             sess.report_path = paths.get("pdf")
             db.commit()
-    except Exception as exc:
+    except Exception as exc: # pylint: disable=broad-exception-caught
         db.rollback()
         print(f"[sessions.py] Errore aggiornamento sessione al close: {exc}")
     finally:

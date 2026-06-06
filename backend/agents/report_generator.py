@@ -32,7 +32,7 @@ try:
     test_file = REPORTS_DIR / ".write_test"
     test_file.write_text("test")
     test_file.unlink()
-except Exception as e:
+except (OSError, IOError) as e: # pylint: disable=broad-exception-caught
     print(f"[ReportGenerator] ⚠️ Errore creazione/verifica cartella reports: {e}", file=sys.stderr)
     # Fallback a una cartella temporanea
     import tempfile
@@ -40,7 +40,7 @@ except Exception as e:
     try:
         REPORTS_DIR.mkdir(parents=True, exist_ok=True)
         print(f"[ReportGenerator] Fallback a: {REPORTS_DIR}", file=sys.stderr)
-    except Exception as e2:
+    except (OSError, IOError) as e2:
         print(f"[ReportGenerator] ❌ Impossibile creare cartella fallback: {e2}", file=sys.stderr)
         REPORTS_DIR = None
 
@@ -262,7 +262,7 @@ def save_report(report: dict,session_id: int,exam_name: str = "Esame",) -> dict[
             md_content = generate_markdown(report, session_id, exam_name)
             md_path.write_text(md_content, encoding="utf-8")
             print(f"[ReportGenerator] ✅ Salvato Markdown: {md_path}")
-        except Exception as md_e:
+        except Exception as md_e: # pylint: disable=broad-exception-caught
             print(f"[ReportGenerator] ⚠️ Errore salvataggio Markdown: {md_e}", file=sys.stderr)
             print(traceback.format_exc(), file=sys.stderr)
             md_path = None
@@ -272,7 +272,7 @@ def save_report(report: dict,session_id: int,exam_name: str = "Esame",) -> dict[
             pdf_bytes = generate_pdf(report, session_id, exam_name)
             pdf_path.write_bytes(pdf_bytes)
             print(f"[ReportGenerator] ✅ Salvato PDF: {pdf_path}")
-        except Exception as pdf_e:
+        except Exception as pdf_e: # pylint: disable=broad-exception-caught
             print(f"[ReportGenerator] ⚠️ Errore salvataggio PDF: {pdf_e}", file=sys.stderr)
             print(traceback.format_exc(), file=sys.stderr)
             pdf_path = None
@@ -282,7 +282,7 @@ def save_report(report: dict,session_id: int,exam_name: str = "Esame",) -> dict[
             "pdf": str(pdf_path) if pdf_path else ""
         }
     
-    except Exception as e:
+    except Exception as e: # pylint: disable=broad-exception-caught
         print(f"[ReportGenerator] ❌ Errore critico in save_report: {e}", file=sys.stderr)
         print(traceback.format_exc(), file=sys.stderr)
         return {"md": "", "pdf": ""}

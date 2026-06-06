@@ -8,7 +8,7 @@ Endpoint:
 """
 
 from pathlib import Path
-
+from sqlalchemy.exc import SQLAlchemyError
 from fastapi import APIRouter, File, HTTPException, Query, UploadFile, status
 
 from backend.agents.ingestor import delete_exam_collection, ingest_pdf
@@ -19,8 +19,6 @@ from backend.models.schemas import (
     ExamResponse,
     IngestResponse,
 )
-
-from sqlalchemy.exc import SQLAlchemyError
 
 router = APIRouter(prefix="/exams", tags=["exams"])
 

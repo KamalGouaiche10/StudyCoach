@@ -203,7 +203,7 @@ def generate_notes_from_log(
         try:
             chunks      = retrieve_chunks(query, student_id, exam_id, n_results=6)
             rag_context = "\n\n---\n\n".join(chunks)
-        except Exception as e:
+        except Exception as e: # pylint: disable=broad-exception-caught
             print(f"[NotesGeneratorAgent] RAG enrichment fallito: {e}")
 
     template = _load_prompt_template()

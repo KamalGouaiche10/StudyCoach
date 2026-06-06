@@ -2,18 +2,19 @@
 pages/upload.py — Gestione esami e upload PDF
 """
 
-import streamlit as st
-import sys
 import logging
-from pathlib import Path
+import sys
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Iterable
+
+import streamlit as st
+from sqlalchemy.exc import SQLAlchemyError
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from backend.db.models import SessionLocal, Exam, Session as DbSession
-from backend.agents.ingestor import ingest_pdf, delete_exam_collection
-from sqlalchemy.exc import SQLAlchemyError
+from backend.agents.ingestor import delete_exam_collection, ingest_pdf # pylint: disable=wrong-import-position
+from backend.db.models import Exam, SessionLocal, Session as DbSession # pylint: disable=wrong-import-position
 
 logger = logging.getLogger(__name__)
 
@@ -246,7 +247,7 @@ def render():
                                 st.success(f"✅ {stats['chunks']} chunk indicizzati da {stats['pages']} pagine")
                             except (FileNotFoundError, ValueError) as e:
                                 st.error(f"Errore indicizzazione: {e}")
-                            except Exception as e:
+                            except Exception as e: # pylint: disable=broad-exception-caught
                                 logger.exception("Unexpected error during ingest_pdf for %s: %s", pdf_path, e)
                                 st.error(f"Errore indicizzazione: {e}")
 
@@ -319,7 +320,7 @@ def _render_notes_panel(exam: Exam, student_id: int):
         except ValueError as e:
             st.warning(f"⚠️ {e}")
             return
-        except Exception as e:
+        except Exception as e: # pylint: disable=broad-exception-caught
             logger.exception("generate_notes failed for exam %s: %s", exam.id, e)
             st.error(f"Errore generazione appunti: {e}")
             return
