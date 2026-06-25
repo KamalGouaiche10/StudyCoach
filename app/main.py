@@ -145,5 +145,8 @@ elif page == "session":
 elif page == "history":
     from pages.history import render
     render()
+elif page == "exam":
+    from pages.exam import render
+    render()
 else:
     st.error(f"Pagina sconosciuta: {page}")

@@ -14,7 +14,7 @@ from sqlalchemy.exc import SQLAlchemyError
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from backend.agents.ingestor import delete_exam_collection, ingest_pdf # pylint: disable=wrong-import-position
-from backend.db.models import Exam, SessionLocal, Session as DbSession # pylint: disable=wrong-import-position
+from backend.db.models import Exam, Material, SessionLocal, Session as DbSession # pylint: disable=wrong-import-position
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +49,25 @@ def _create_exam(student_id: int, name: str) -> Exam:
         db.close()
 
 
+def _rename_exam(exam_id: int, student_id: int, new_name: str) -> bool:
+    """Rinomina un esame. Restituisce True se aggiornato."""
+    db = SessionLocal()
+    try:
+        exam = db.query(Exam).filter(Exam.id == exam_id, Exam.student_id == student_id).first()
+        if exam:
+            exam.name = (new_name or "").strip()
+            db.commit()
+            db.refresh(exam)
+            return True
+        return False
+    except SQLAlchemyError:
+        logger.exception("Failed to rename exam id=%s for student_id=%s", exam_id, student_id)
+        db.rollback()
+        return False
+    finally:
+        db.close()
+
+
 def _delete_exam(exam_id: int, student_id: int):
     db = SessionLocal()
     try:
@@ -70,6 +89,53 @@ def _delete_exam(exam_id: int, student_id: int):
         # delete_exam_collection already ignores ValueError when collection
         # does not exist; log for diagnostics.
         logger.debug("delete_exam_collection: %s", e)
+
+
+def _get_exam_materials(exam_id: int) -> list:
+    """Recupera tutti i materiali caricati per un esame."""
+    db = SessionLocal()
+    try:
+        return db.query(Material).filter(Material.exam_id == exam_id).order_by(Material.uploaded_at.desc()).all()
+    finally:
+        db.close()
+
+
+def _create_material_record(exam_id: int, filename: str, stored_path: str, chunks_count: int, pages_count: int) -> Material:
+    """Registra un nuovo materiale nel database."""
+    db = SessionLocal()
+    try:
+        material = Material(
+            exam_id=exam_id,
+            filename=filename,
+            stored_path=stored_path,
+            chunks_count=chunks_count,
+            pages_count=pages_count
+        )
+        db.add(material)
+        db.commit()
+        db.refresh(material)
+        return material
+    finally:
+        db.close()
+
+
+def _delete_material(material_id: int, exam_id: int):
+    """Elimina un materiale dal database e cancella il file."""
+    db = SessionLocal()
+    try:
+        material = db.query(Material).filter(Material.id == material_id, Material.exam_id == exam_id).first()
+        if material:
+            try:
+                Path(material.stored_path).unlink()
+            except FileNotFoundError:
+                pass
+            db.delete(material)
+            db.commit()
+    except SQLAlchemyError:
+        logger.exception("Failed to delete material id=%s", material_id)
+        db.rollback()
+    finally:
+        db.close()
 
 
 def _session_count(exam_id: int) -> int:
@@ -163,10 +229,19 @@ def render():
     """, unsafe_allow_html=True)
 
     # ── CREA NUOVO ESAME ───────────────────────────────────────────────────
-    with st.expander("➕ Crea nuovo esame", expanded=False):
+    # Inizializza lo stato dell'expander se non esiste
+    if "create_exam_expanded" not in st.session_state:
+        st.session_state.create_exam_expanded = False
+    
+    # Pulisci il campo se l'esame è stato appena creato
+    if st.session_state.get("just_created_exam", False):
+        st.session_state.exam_name_input = ""
+        st.session_state.just_created_exam = False
+    
+    with st.expander("➕ Crea nuovo esame", expanded=st.session_state.create_exam_expanded):
         col_name, col_btn = st.columns([3, 1])
         with col_name:
-            exam_name = st.text_input("Nome esame", placeholder="es. Programmazione AI a.a. 2025/26", label_visibility="collapsed")
+            exam_name = st.text_input("Nome esame", placeholder="es. Programmazione AI a.a. 2025/26", label_visibility="collapsed", key="exam_name_input")
         with col_btn:
             create_clicked = st.button("Crea", type="primary", use_container_width=True)
 
@@ -177,6 +252,8 @@ def render():
             else:
                 _create_exam(student_id, exam_name_val)
                 st.success(f"Esame «{exam_name_val}» creato!")
+                st.session_state.create_exam_expanded = False
+                st.session_state.just_created_exam = True
                 st.rerun()
 
     # ── LISTA ESAMI ────────────────────────────────────────────────────────
@@ -193,107 +270,66 @@ def render():
 
     st.markdown(f"<p style='color:#6b7280; font-size:0.9rem;'>{len(exams)} esame/i</p>", unsafe_allow_html=True)
 
-    for exam in exams:
-        n_sessions = _session_count(exam.id)
-        avg        = _avg_score(exam.id)
-        avg_str    = f"{avg}/10" if avg is not None else "—"
+    # Rendi la homepage simile alla schermata: riga di card (3 per riga) con nome, data e numero fonti, e un bottone Apri sotto ogni card.
+    cols_per_row = 3
 
-        with st.container():
-            st.markdown(f"""
-            <div class="sc-card">
-                <div style="display:flex; justify-content:space-between; align-items:flex-start;">
-                    <div>
-                        <div style="font-family:'Syne',sans-serif; font-weight:700; font-size:1.05rem;">
-                            📖 {exam.name}
-                        </div>
-                        <div style="color:#6b7280; font-size:0.82rem; margin-top:0.3rem;">
-                            Creato il {exam.created_at.strftime('%d/%m/%Y') if exam.created_at else '—'}
-                            &nbsp;·&nbsp; {n_sessions} sessioni
-                            &nbsp;·&nbsp; Media: <strong>{avg_str}</strong>
-                        </div>
-                    </div>
+    st.markdown("<div style='height:0.5rem'></div>", unsafe_allow_html=True)
+
+    # Render tiles 3 per riga
+    for i in range(0, len(exams), cols_per_row):
+        row = exams[i:i + cols_per_row]
+        cols = st.columns(len(row), gap="large")
+        for col, exam in zip(cols, row):
+            with col:
+                materials = _get_exam_materials(exam.id)
+                n_sources = len(materials) if materials else 0
+                created = exam.created_at.strftime('%d/%m/%Y') if exam.created_at else '—'
+
+                st.markdown(f"""
+                <div class="sc-card" style="min-height:7rem; display:flex; flex-direction:column; justify-content:center;">
+                    <div style="font-family:'Syne',sans-serif; font-weight:700; font-size:1.05rem;">{exam.name}</div>
+                    <div style="color:#6b7280; font-size:0.78rem; margin-top:0.35rem;">{created} · {n_sources} fonti</div>
                 </div>
-            </div>
-            """, unsafe_allow_html=True)
+                """, unsafe_allow_html=True)
 
-            col_upload, col_start, col_notes, col_hist, col_del = st.columns([2, 1.5, 1.5, 1.5, 1])
+                # Azioni: Apri | Modifica | Elimina
+                col_a, col_b, col_c = st.columns([1.2, 1, 1])
+                with col_a:
+                    if st.button("Apri", key=f"open_{exam.id}", use_container_width=True):
+                        st.session_state.current_exam = {"id": exam.id, "name": exam.name}
+                        st.session_state.current_page = "exam"
+                        st.rerun()
+                with col_b:
+                    if st.button("Modifica", key=f"edit_{exam.id}", use_container_width=True):
+                        st.session_state[f"editing_exam_{exam.id}"] = True
+                        st.rerun()
+                with col_c:
+                    if st.button("Elimina", key=f"del_{exam.id}_tile", use_container_width=True):
+                        _delete_exam(exam.id, student_id)
+                        st.warning(f"Esame «{exam.name}» eliminato.")
+                        st.rerun()
 
-            with col_upload:
-                uploaded = st.file_uploader(
-                    f"PDF esame_{exam.id}",
-                    type="pdf",
-                    key=f"pdf_{exam.id}",
-                    label_visibility="collapsed",
-                )
+                # Inline editor per rinominare l'esame
+                if st.session_state.get(f"editing_exam_{exam.id}", False):
+                    new_name = st.text_input("Nuovo nome esame", value=exam.name, key=f"edit_name_{exam.id}")
+                    c1, c2 = st.columns([1, 1])
+                    with c1:
+                        if st.button("Salva", key=f"save_edit_{exam.id}", use_container_width=True):
+                            ok = _rename_exam(exam.id, student_id, new_name)
+                            st.session_state[f"editing_exam_{exam.id}"] = False
+                            if ok:
+                                st.success("Nome esame aggiornato.")
+                            else:
+                                st.error("Impossibile aggiornare il nome esame.")
+                            st.rerun()
+                    with c2:
+                        if st.button("Annulla", key=f"cancel_edit_{exam.id}", use_container_width=True):
+                            st.session_state[f"editing_exam_{exam.id}"] = False
+                            st.rerun()
 
-                # Streamlit type stubs allow UploadedFile | list[UploadedFile];
-                # normalizziamo in una lista per gestire entrambi i casi.
-                if uploaded:
-                    files: Iterable = uploaded if isinstance(uploaded, list) else [uploaded]
-                    upload_dir = Path(__file__).parent.parent.parent / "data" / "uploads"
-                    upload_dir.mkdir(parents=True, exist_ok=True)
-                    for file_obj in files:
-                        try:
-                            pdf_path = upload_dir / f"s{student_id}_e{exam.id}_{file_obj.name}"
-                            pdf_path.write_bytes(file_obj.read())
-                        except (OSError, AttributeError, TypeError) as e:
-                            logger.exception("Failed to save uploaded PDF for exam %s: %s", exam.id, e)
-                            st.error("Errore salvataggio file.")
-                            continue
+                st.markdown("<div style='height:0.5rem'></div>", unsafe_allow_html=True)
 
-                        with st.spinner("Indicizzazione PDF in corso..."):
-                            try:
-                                stats = ingest_pdf(str(pdf_path), student_id, exam.id)
-                                st.success(f"✅ {stats['chunks']} chunk indicizzati da {stats['pages']} pagine")
-                            except (FileNotFoundError, ValueError) as e:
-                                st.error(f"Errore indicizzazione: {e}")
-                            except Exception as e: # pylint: disable=broad-exception-caught
-                                logger.exception("Unexpected error during ingest_pdf for %s: %s", pdf_path, e)
-                                st.error(f"Errore indicizzazione: {e}")
-
-            with col_start:
-                if st.button("▶ Avvia sessione", key=f"start_{exam.id}", type="primary", use_container_width=True):
-                    # FIX — chiude le sessioni orfane prima di aprirne una nuova
-                    # così in history non appaiono più come "In corso"
-                    closed = _close_orphan_sessions(exam.id)
-                    if closed:
-                        print(f"[upload.py] Chiuse {closed} sessioni orfane per exam_id={exam.id}")
-
-                    st.session_state.current_exam    = {"id": exam.id, "name": exam.name}
-                    st.session_state.current_page    = "session"
-                    st.session_state.quiz_result     = None
-                    st.session_state.adaptive_engine = None
-                    st.session_state.tutor           = None
-                    st.session_state.current_q_idx   = 0
-                    st.session_state.tutor_state     = "idle"
-                    st.session_state.current_session = None
-                    st.rerun()
-
-            with col_notes:
-                if st.button("📋 Genera appunti", key=f"notes_{exam.id}", use_container_width=True,
-                             help="Genera appunti sintetici dal materiale caricato"):
-                    st.session_state[f"show_notes_{exam.id}"] = not st.session_state.get(f"show_notes_{exam.id}", False)
-                    if st.session_state[f"show_notes_{exam.id}"]:
-                        st.session_state.pop(f"_notes_cache_exam_{exam.id}", None)
-                    st.rerun()
-
-            with col_hist:
-                if st.button("📋 Storico", key=f"hist_{exam.id}", use_container_width=True):
-                    st.session_state.current_exam  = {"id": exam.id, "name": exam.name}
-                    st.session_state.current_page  = "history"
-                    st.rerun()
-
-            with col_del:
-                if st.button("🗑", key=f"del_{exam.id}", use_container_width=True, help="Elimina esame"):
-                    _delete_exam(exam.id, student_id)
-                    st.warning(f"Esame «{exam.name}» eliminato.")
-                    st.rerun()
-
-            # ── Pannello appunti sintetici da materiale RAG ────────────────
-            if st.session_state.get(f"show_notes_{exam.id}", False):
-                _render_notes_panel(exam, student_id)
-
-            st.markdown("<div style='height:0.25rem'></div>", unsafe_allow_html=True)
+    st.markdown("<div style='height:0.25rem'></div>", unsafe_allow_html=True)
 
 
 def _render_notes_panel(exam: Exam, student_id: int):

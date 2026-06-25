@@ -45,6 +45,7 @@ class Exam(Base):
         created_at: Data e ora di creazione del record.
         student: Riferimento allo studente associato.
         sessions: Collezione delle sessioni di studio legate all'esame.
+        materials: Collezione dei materiali (PDF) caricati per l'esame.
     """
     __tablename__ = "exams"
     id         = Column(Integer, primary_key=True)
@@ -53,6 +54,30 @@ class Exam(Base):
     created_at = Column(DateTime(timezone=True), default=now_utc)
     student    = relationship("Student", back_populates="exams")
     sessions   = relationship("Session", back_populates="exam", cascade="all, delete")
+    materials  = relationship("Material", back_populates="exam", cascade="all, delete")
+
+class Material(Base):
+    """Rappresenta un materiale (PDF) caricato per uno studio.
+
+    Attributi:
+        id: Identificativo univoco del materiale.
+        exam_id: Chiave esterna verso l'esame associato.
+        filename: Nome del file originale.
+        stored_path: Percorso del file salvato nel filesystem.
+        chunks_count: Numero di chunk indicizzati.
+        pages_count: Numero di pagine nel PDF.
+        uploaded_at: Data e ora di caricamento.
+        exam: Riferimento all'esame associato.
+    """
+    __tablename__ = "materials"
+    id           = Column(Integer, primary_key=True)
+    exam_id      = Column(Integer, ForeignKey("exams.id"), nullable=False)
+    filename     = Column(String(255), nullable=False)
+    stored_path  = Column(String(500), nullable=False)
+    chunks_count = Column(Integer, default=0)
+    pages_count  = Column(Integer, default=0)
+    uploaded_at  = Column(DateTime(timezone=True), default=now_utc)
+    exam         = relationship("Exam", back_populates="materials")
 
 class Session(Base):
     """Rappresenta una sessione di studio o interrogazione per un esame.

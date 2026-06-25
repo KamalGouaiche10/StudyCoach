@@ -1,9 +1,10 @@
 import json
+import hashlib
+import re
 from pathlib import Path
 from pypdf import PdfReader
 import chromadb
 from chromadb import Documents, EmbeddingFunction, Embeddings
-from sentence_transformers import SentenceTransformer
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -11,8 +12,36 @@ load_dotenv()
 CHROMA_PATH = "./data/chroma"
 client = chromadb.PersistentClient(path=CHROMA_PATH)
 
-# Modello locale leggero (~90MB, scaricato automaticamente la prima volta)
-_model = SentenceTransformer("all-MiniLM-L6-v2")
+_EMBEDDING_DIM = 384
+
+
+def _tokenize(text: str) -> list[str]:
+    return re.findall(r"\b\w+\b", text.lower())
+
+
+def _fallback_embed(texts: Documents) -> Embeddings:
+    vectors: list[list[float]] = []
+    for text in texts:
+        tokens = _tokenize(str(text))
+        vec = [0.0] * _EMBEDDING_DIM
+        for token in tokens:
+            digest = hashlib.blake2b(token.encode("utf-8"), digest_size=8).digest()
+            idx = int.from_bytes(digest, "big") % _EMBEDDING_DIM
+            vec[idx] += 1.0
+
+        norm = sum(v * v for v in vec) ** 0.5
+        if norm:
+            vec = [v / norm for v in vec]
+        vectors.append(vec)
+    return vectors
+
+
+def _load_sentence_transformer():
+    try:
+        from sentence_transformers import SentenceTransformer
+        return SentenceTransformer("all-MiniLM-L6-v2")
+    except Exception:
+        return None
 
 
 class LocalEmbeddingFunction(EmbeddingFunction):
@@ -22,8 +51,11 @@ class LocalEmbeddingFunction(EmbeddingFunction):
     Modello: all-MiniLM-L6-v2 (384 dimensioni, veloce e preciso)
     """
     def __call__(self, texts: Documents) -> Embeddings:
-        embeddings = _model.encode(list(texts), convert_to_numpy=True)
-        return embeddings.tolist()
+        model = _load_sentence_transformer()
+        if model is not None:
+            embeddings = model.encode(list(texts), convert_to_numpy=True)
+            return embeddings.tolist()
+        return _fallback_embed(texts)
 
 
 local_ef = LocalEmbeddingFunction()
@@ -80,7 +112,8 @@ def ingest_pdf(pdf_path: str, student_id: int, exam_id: int) -> dict:
                 "student_id": student_id,
                 "exam_id": exam_id,
                 "page": page_num,
-                "source": path.name
+                "source": path.name,
+                "source_file": path.name
             })
             all_ids.append(f"s{student_id}_e{exam_id}_c{chunk_counter}")
             chunk_counter += 1
@@ -113,10 +146,27 @@ def retrieve_chunks(query: str, student_id: int, exam_id: int, n_results: int = 
     return documents[0]
 
 
+def retrieve_chunks_by_source(student_id: int, exam_id: int, source_file: str, limit: int = 12) -> list[str]:
+    collection = get_collection(student_id, exam_id)
+    try:
+        results = collection.get(
+            where={"source_file": source_file},
+            limit=limit,
+            include=["documents"],
+        )
+    except Exception:
+        return []
+
+    documents = results.get("documents") or []
+    return [doc for doc in documents if isinstance(doc, str) and doc.strip()]
+
+
 def delete_exam_collection(student_id: int, exam_id: int) -> None:
     name = f"student_{student_id}_exam_{exam_id}"
     try:
         client.delete_collection(name)
         print(f"[Ingestor] Collection {name} eliminata.")
-    except ValueError:
+    except (ValueError, Exception) as e:
+        # Catch ValueError and any other exception (e.g., NotFoundError)
+        # if the collection doesn't exist
         pass

@@ -10,6 +10,7 @@ Supporta più studenti e più esami in sessioni separate e persistenti.
 ## Stack
 
 - **Linguaggio:** Python 3.11+
+- **Linguaggio:** Python 3.13+
 - **Agent framework:** Agno (agenti, tool use, orchestrazione multi-agent)
 - **LLM:** OpenAI GPT-4o via Agno (provider configurabile da `.env`)
 - **Vector DB / RAG:** ChromaDB persistente (`data/chroma/`), embeddings OpenAI
@@ -19,7 +20,7 @@ Supporta più studenti e più esami in sessioni separate e persistenti.
 - **Modelli dati:** Pydantic v2 (`backend/models/`)
 - **Ingestion PDF:** pypdf (`backend/agents/ingestor.py`)
 - **Config e segreti:** python-dotenv (`.env`, mai committato)
-- **Dipendenze:** `requirements.txt` + uv
+- **Dipendenze:** `pyproject.toml` + `uv.lock` (metadati e dipendenze gestite tramite `pyproject.toml`)
 
 ## Struttura
 
@@ -52,6 +53,8 @@ study_coach/
   ChromaDB usano namespace `{student_id}_{exam_id}`
 - **Segreti:** tutte le API key e path in `.env`; accesso centralizzato tramite `config.py`
 - **UI:** le pagine Streamlit contengono solo logica di presentazione; chiamano il backend via API
+
+<!-- modified: il repository corrente utilizza direttamente python-dotenv e variabili d'ambiente; non è presente un `config.py` centralizzato -->
 
 ## Testing
 

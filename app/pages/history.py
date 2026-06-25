@@ -349,20 +349,22 @@ def render():
         """, unsafe_allow_html=True)
         return
 
-    exam_options = {f"{e.name} (id {e.id})": e for e in exams}
-    default_key  = None
+    # Usa oggetti Exam direttamente e mostra solo il nome (senza id)
+    default_idx = 0
     if current_exam:
-        for k, e in exam_options.items():
+        for idx, e in enumerate(exams):
             if e.id == current_exam["id"]:
-                default_key = k
+                default_idx = idx
                 break
 
-    keys        = list(exam_options.keys())
-    default_idx = keys.index(default_key) if default_key else 0
-
-    selected_key  = st.selectbox("Seleziona esame", keys, index=default_idx, label_visibility="collapsed")
-    selected_exam = exam_options[selected_key]
-    sessions      = _get_sessions(selected_exam.id)
+    selected_exam = st.selectbox(
+        "Seleziona esame",
+        exams,
+        index=default_idx,
+        format_func=lambda e: e.name,
+        label_visibility="collapsed",
+    )
+    sessions = _get_sessions(selected_exam.id)
 
     st.markdown(f"""
     <div style="display:flex; align-items:center; gap:1rem; margin:1rem 0 0.75rem;">
