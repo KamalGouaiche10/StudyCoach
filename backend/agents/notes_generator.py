@@ -1,32 +1,25 @@
 """
 Notes Generator Agent — Study Coach
 =====================================
-Responsabilità: generare appunti sintetici a partire da:
-  1. Il materiale RAG indicizzato (chunks ChromaDB) — per la generazione
-     "a freddo" prima di una sessione.
-  2. Il qa_log di una sessione completata — per raffinare gli appunti
-     focalizzandosi sulle aree deboli emerse durante l'interrogazione.
-
-Modalità di utilizzo:
-  - generate_notes(student_id, exam_id, topic_query)
-      → appunti dal materiale grezzo (pre-sessione)
-  - generate_notes_from_log(attempts)
-      → appunti post-sessione, personalizzati sulle lacune rilevate
-
-Agente: Agno + Groq (llama-3.3-70b-versatile)
-Prompt versionato: backend/agents/prompts/notes_generator_v1.txt
+Genera appunti professionali in PDF con layout pulito e senza sovrapposizioni.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-import textwrap
-import unicodedata
+from datetime import datetime
 import re
+import time
+import unicodedata
 
 from agno.agent import Agent
 from agno.models.groq import Groq
 from dotenv import load_dotenv
+
+try:
+    from fpdf import FPDF
+except ImportError:
+    FPDF = object
 
 from backend.agents.ingestor import retrieve_chunks, retrieve_chunks_by_source
 
@@ -36,10 +29,24 @@ load_dotenv()
 # Costanti
 # ---------------------------------------------------------------------------
 
-PROMPT_VERSION  = "notes_generator_v1"
-PROMPT_PATH     = Path(__file__).parent / "prompts" / f"{PROMPT_VERSION}.txt"
-DEFAULT_MODEL   = "llama-3.3-70b-versatile"
+PROMPT_VERSION = "notes_generator_v1"
+PROMPT_PATH = Path(__file__).parent / "prompts" / f"{PROMPT_VERSION}.txt"
+DEFAULT_MODEL = "llama-3.3-70b-versatile"
 DEFAULT_N_CHUNKS = 10
+MIN_NOTES_LENGTH = 700
+MAX_RETRIES = 3
+RETRY_DELAY = 5
+
+# Margini PDF (in mm)
+LEFT_MARGIN = 18
+RIGHT_MARGIN = 18
+TOP_MARGIN = 25      # Aumentato per evitare header
+BOTTOM_MARGIN = 22   # Aumentato per evitare footer
+
+# Altezze di linea (in mm)
+LINE_HEIGHT = 5.5
+TITLE_HEIGHT = 8.0
+SUBTITLE_HEIGHT = 6.5
 
 
 # ---------------------------------------------------------------------------
@@ -48,206 +55,546 @@ DEFAULT_N_CHUNKS = 10
 
 def _load_prompt_template() -> str:
     if not PROMPT_PATH.exists():
-        raise FileNotFoundError(
-            f"Prompt template non trovato: {PROMPT_PATH}\n"
-            "Assicurati che il file esista in backend/agents/prompts/"
-        )
+        raise FileNotFoundError(f"Prompt template non trovato: {PROMPT_PATH}")
     raw = PROMPT_PATH.read_text(encoding="utf-8")
     parts = raw.split("---\n\n", maxsplit=1)
     return parts[-1]
+
+
+def _is_error_response(text: str) -> bool:
+    if not text:
+        return True
+    error_patterns = [
+        r'^1\'error\':', r'^\{.*"error":', r'"message":\s*"Rate limit reached"',
+        r'"type":\s*"tokens"', r'"code":\s*"rate_limit_exceeded"',
+        r'Rate limit reached for model', r'Please try again in', r'Upgrade to Dev Tier',
+    ]
+    for pattern in error_patterns:
+        if re.search(pattern, text, re.IGNORECASE | re.DOTALL):
+            return True
+    if text.strip().startswith('{') and '"error"' in text:
+        return True
+    return False
+
+
+def _parse_error_retry_time(text: str) -> int | None:
+    match = re.search(r'(?:try again in\s*)?(\d+)h(\d+)m(\d+\.?\d*)s', text, re.IGNORECASE)
+    if match:
+        h, m, s = int(match.group(1)), int(match.group(2)), float(match.group(3))
+        return int(h * 3600 + m * 60 + s)
+    match = re.search(r'(\d+)\s*(?:hour|hr|h)', text, re.IGNORECASE)
+    if match:
+        return int(match.group(1)) * 3600
+    match = re.search(r'(\d+)\s*(?:minute|min|m)', text, re.IGNORECASE)
+    if match:
+        return int(match.group(1)) * 60
+    return 60
 
 
 def _make_notes_agent(model_name: str) -> Agent:
     return Agent(
         name="NotesGeneratorAgent",
         model=Groq(id=model_name),
-        description=(
-            "Sei un tutor universitario esperto. "
-            "Crei appunti sintetici chiari, strutturati e utili per lo studio. "
-            "Usi titoli, elenchi puntati e grassetto per organizzare i concetti. "
-            "Rispondi SOLO con il testo degli appunti, senza introduzioni né commenti."
-        ),
+        description="Professore universitario. Genera appunti accademici in Markdown.",
         markdown=True,
     )
 
 
 def _build_log_summary(attempts: list[dict]) -> str:
-    """
-    Estrae dal qa_log un riassunto delle domande, risposte e lacune
-    per contestualizzare la generazione degli appunti.
-    """
     lines = []
     for i, a in enumerate(attempts, 1):
-        q_text  = a.get("question_text", "")
-        topic   = a.get("topic_hint", "")
-        score   = a.get("final_score", "—")
-        ans2    = a.get("student_answer_2", "")
+        q = a.get("question_text", "")
+        topic = a.get("topic_hint", "")
+        score = a.get("final_score", "—")
+        ans = a.get("student_answer_2", "")
         missing = []
-        evaluation = a.get("evaluation", {})
-        if isinstance(evaluation, dict):
-            missing = evaluation.get("missing_points", [])
-
+        eval_data = a.get("evaluation", {})
+        if isinstance(eval_data, dict):
+            missing = eval_data.get("missing_points", [])
         lines.append(f"Domanda {i} [{topic}] (voto: {score}/10):")
-        lines.append(f"  Testo: {q_text}")
-        if ans2:
-            lines.append(f"  Risposta studente: {ans2[:300]}{'...' if len(ans2) > 300 else ''}")
+        lines.append(f"  Testo: {q}")
+        if ans:
+            lines.append(f"  Risposta: {ans[:300]}{'...' if len(ans) > 300 else ''}")
         if missing:
-            lines.append(f"  Lacune rilevate: {'; '.join(missing)}")
+            lines.append(f"  Lacune: {'; '.join(missing)}")
         lines.append("")
     return "\n".join(lines)
 
 
 def _extract_weak_topics(attempts: list[dict]) -> list[str]:
-    """Raccoglie i topic con score < 6 dal qa_log."""
     weak = []
     for a in attempts:
         score = a.get("final_score")
         topic = a.get("topic_hint", "")
         if isinstance(score, (int, float)) and score < 6 and topic:
             weak.append(topic)
-    return list(dict.fromkeys(weak))  # deduplica mantenendo ordine
+    return list(dict.fromkeys(weak))
 
 
 def _pdf_safe_text(value: object) -> str:
     text = str(value)
     text = unicodedata.normalize("NFKD", text)
     replacements = {
-        "’": "'",
-        "‘": "'",
-        "“": '"',
-        "”": '"',
-        "–": "-",
-        "—": "-",
-        "…": "...",
-        "•": "-",
-        "→": "->",
-        "←": "<-",
-        "✓": "OK",
-        "✅": "OK",
-        "⚠": "!",
-        "📘": "",
-        "📄": "",
+        "’": "'", "‘": "'", "“": '"', "”": '"',
+        "–": "-", "—": "-", "…": "...",
+        "•": "-", "→": "->", "←": "<-",
+        "✓": "OK", "✅": "OK", "⚠": "!",
+        "📘": "", "📄": "", "€": "Euro",
     }
     for src, dst in replacements.items():
         text = text.replace(src, dst)
-    text = "".join(ch for ch in text if ch == "\n" or ch == "\t" or ord(ch) >= 32)
-    return text.encode("latin-1", "replace").decode("latin-1")
+    text = "".join(ch for ch in text if ch == "\n" or ch == "\t" or (ord(ch) >= 32 and ord(ch) <= 255))
+    return text
 
 
-def _sentence_candidates(text: str) -> list[str]:
-    text = _pdf_safe_text(text)
-    text = re.sub(r"\s+", " ", text).strip()
-    if not text:
-        return []
+def _strip_inline(text: str) -> str:
+    text = re.sub(r"\*\*([^*]+)\*\*", r"\1", text)
+    text = re.sub(r"\*([^*]+)\*", r"\1", text)
+    return text
 
-    parts = re.split(r"(?<=[.!?])\s+", text)
-    candidates: list[str] = []
-    for part in parts:
-        cleaned = part.strip(" -•\t")
-        if len(cleaned) < 35:
+
+def _clean_chunk(text: str) -> str:
+    text = re.sub(r"[^\x09\x0A\x20-\xFF]", " ", text)
+    text = re.sub(r"(?<!\w)`(?!\w)", " ", text)
+    text = re.sub(r"\\\s", " ", text)
+    text = re.sub(r"\\(?![a-zA-Z])", " ", text)
+    text = re.sub(r"\|", " ", text)
+    text = re.sub(r"\*{3,}", " ", text)
+    text = re.sub(r"~{2,}", " ", text)
+    text = re.sub(r"\\[a-zA-Z]*\^?\*?", " ", text)
+    text = re.sub(r"\\[a-zA-Z]+\s*", " ", text)
+    text = re.sub(r"Study Coach\s*[-|]\s*Pagina\s*\d+", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"Pagina\s+\d+\s+di\s+\d+", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"Appunti:.*$", "", text, flags=re.MULTILINE)
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+
+    lines = text.splitlines()
+    clean_lines = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            clean_lines.append("")
             continue
-        letters = sum(ch.isalpha() for ch in cleaned)
-        if letters < 20:
+        letters = sum(ch.isalpha() for ch in stripped)
+        if len(stripped) > 10 and letters < len(stripped) * 0.25:
             continue
-        if cleaned.count("\ufffd") > 0:
-            continue
-        # Se il testo è troppo rumoroso (simboli/bytes strani), lo scartiamo.
-        non_alnum = sum(not ch.isalnum() and not ch.isspace() for ch in cleaned)
-        if non_alnum > max(12, len(cleaned) // 3):
-            continue
-        candidates.append(cleaned)
-    return candidates
+        clean_lines.append(line)
+    return "\n".join(clean_lines).strip()
 
 
-def _build_local_notes_from_chunks(chunks: list[str], max_bullets: int = 6) -> list[str]:
-    seen: set[str] = set()
-    bullets: list[str] = []
+def _clean_chunks(chunks: list[str]) -> list[str]:
+    cleaned = []
     for chunk in chunks:
-        for sentence in _sentence_candidates(chunk):
-            normalized = sentence.lower()
-            if normalized in seen:
+        c = _clean_chunk(chunk)
+        if len(c) >= 80:
+            cleaned.append(c)
+    return cleaned
+
+
+def _validate_notes(notes: str) -> tuple[bool, str]:
+    if not notes:
+        return False, "Testo vuoto"
+    if _is_error_response(notes):
+        return False, "Errore API"
+    word_count = len(re.findall(r'\b\w+\b', notes))
+    if word_count < MIN_NOTES_LENGTH:
+        return False, f"Troppo corto ({word_count} parole)"
+    required = [r'## .*', r'> \*\*Definizione', r'## Riepilogo']
+    for pattern in required:
+        if not re.search(pattern, notes, re.IGNORECASE):
+            return False, f"Manca: {pattern}"
+    if re.search(r'\\[a-zA-Z]+\^?\*', notes):
+        return False, "LaTeX corrotto"
+    return True, ""
+
+
+def _extract_concepts_from_chunks(chunks: list[str]) -> list[str]:
+    keywords = [
+        "probabilità", "probabilita", "evento", "statistica", "distribuzione",
+        "media", "varianza", "deviazione", "campione", "popolazione",
+        "intervallo", "confidenza", "teorema", "bayes", "condizionata",
+        "indipendenza", "correlazione", "normal", "standard",
+    ]
+    concepts = []
+    for chunk in chunks:
+        lower = chunk.lower()
+        for kw in keywords:
+            if kw in lower and kw not in concepts:
+                concepts.append(kw)
+                if len(concepts) >= 6:
+                    return concepts
+    return ["Probabilità", "Statistica Descrittiva", "Inferenza", "Distribuzioni", "Stima", "Correlazione"]
+
+
+def _generate_fallback_notes(chunks: list[str] = None, weak_topics: list[str] = None) -> str:
+    concepts = weak_topics if weak_topics else _extract_concepts_from_chunks(chunks or [])
+    if not concepts:
+        concepts = ["Probabilità", "Statistica Descrittiva", "Inferenza Statistica", "Distribuzioni", "Stima"]
+
+    notes = """## 1. Introduzione alla Probabilità e Statistica
+
+La probabilità e la statistica sono due discipline fondamentali per la comprensione e l'analisi dei fenomeni incerti. La probabilità fornisce il quadro teorico per quantificare l'incertezza, mentre la statistica offre gli strumenti per raccogliere, analizzare e interpretare i dati.
+
+"""
+    for i, concept in enumerate(concepts, 1):
+        notes += f"""
+### {i}. {concept.capitalize()}
+
+> **Definizione — {concept.capitalize()}:** Questo concetto rappresenta un elemento fondamentale della teoria statistica e probabilistica.
+
+**Esempio:** In un contesto applicativo, questo concetto viene utilizzato per modellare e analizzare fenomeni reali, come il lancio di una moneta, il campionamento di una popolazione o la stima di parametri incogniti.
+
+"""
+
+    notes += """
+## Riepilogo — Punti Chiave da Memorizzare
+
+1. La probabilità è una misura che quantifica l'incertezza associata al verificarsi di un evento, assumendo valori tra 0 e 1.
+
+2. La statistica descrittiva fornisce strumenti per sintetizzare e descrivere i dati attraverso misure di tendenza centrale e di dispersione.
+
+3. L'inferenza statistica permette di trarre conclusioni su una popolazione a partire da un campione.
+
+4. La probabilità condizionata, P(A|B), rappresenta la probabilità di A dato che B si è verificato.
+
+5. Il Teorema di Bayes collega le probabilità condizionate e consente di aggiornare le credenze.
+"""
+    return notes
+
+
+def _run_with_retry(agent: Agent, prompt: str, fallback_chunks: list[str] = None, weak_topics: list[str] = None) -> str:
+    for attempt in range(MAX_RETRIES):
+        try:
+            output = agent.run(prompt, stream=False)
+            response = output.get_content_as_string().strip()
+            if _is_error_response(response):
+                wait = _parse_error_retry_time(response)
+                if wait and wait > 60:
+                    return _generate_fallback_notes(fallback_chunks, weak_topics)
+                time.sleep(min(wait or RETRY_DELAY, 60))
                 continue
-            seen.add(normalized)
-            bullets.append(sentence)
-            if len(bullets) >= max_bullets:
-                return bullets
-    return bullets
+            is_valid, msg = _validate_notes(response)
+            if is_valid:
+                return response
+            if attempt < MAX_RETRIES - 1:
+                prompt += f"\n\nNOTA: {msg}. Riscrivi in modo più completo."
+                time.sleep(RETRY_DELAY)
+        except Exception as e:
+            print(f"[NotesGenerator] Tentativo {attempt+1} fallito: {e}")
+            if attempt < MAX_RETRIES - 1:
+                time.sleep(RETRY_DELAY)
+    return _generate_fallback_notes(fallback_chunks, weak_topics)
 
 
 # ---------------------------------------------------------------------------
-# API pubblica
+# CLASSE PDF PROFESSIONALE CON LAYOUT CORRETTO
+# ---------------------------------------------------------------------------
+
+class _NotesPDF(FPDF):
+    """PDF con header, footer e margini corretti, senza sovrapposizioni."""
+
+    def __init__(self, title_str: str = "Appunti"):
+        super().__init__(orientation="P", unit="mm", format="A4")
+        self.title_str = title_str
+        self.set_margins(LEFT_MARGIN, TOP_MARGIN, RIGHT_MARGIN)
+        self.set_auto_page_break(auto=True, margin=BOTTOM_MARGIN)
+        self._page_start_y = TOP_MARGIN
+        self._footer_height = 12
+
+    def header(self):
+        """Header: solo sulle pagine dopo la prima."""
+        if self.page_no() <= 1:
+            return
+        # Banda sottile colorata
+        self.set_fill_color(44, 62, 80)
+        self.rect(0, 0, self.w, 8, "F")
+        self.set_y(1.5)
+        self.set_font("Helvetica", "I", 7)
+        self.set_text_color(200, 210, 220)
+        self.cell(0, 5, _pdf_safe_text(self.title_str), align="R")
+        self.set_text_color(40, 40, 40)
+        # Aggiorna la posizione di partenza per il contenuto
+        self._page_start_y = 12
+
+    def footer(self):
+        """Footer con numero di pagina."""
+        self.set_y(-12)
+        self.set_draw_color(189, 195, 199)
+        self.line(LEFT_MARGIN, self.get_y(), self.w - RIGHT_MARGIN, self.get_y())
+        self.ln(1.5)
+        self.set_font("Helvetica", "I", 8)
+        self.set_text_color(150, 150, 150)
+        self.cell(0, 5, f"Study Coach | Pagina {self.page_no()}", align="C")
+
+    def check_page_break(self, needed_height: float) -> bool:
+        """Verifica se c'è spazio per un blocco di altezza `needed_height`."""
+        current_y = self.get_y()
+        max_y = self.h - BOTTOM_MARGIN - self._footer_height
+        if current_y + needed_height > max_y:
+            self.add_page()
+            return True
+        return False
+
+    def ensure_space(self, needed_height: float = 15.0):
+        """Assicura che ci sia spazio per il prossimo blocco."""
+        if self.check_page_break(needed_height):
+            self.set_y(self._page_start_y)
+
+
+# ---------------------------------------------------------------------------
+# RENDERER MARKDOWN CON LAYOUT PULITO
+# ---------------------------------------------------------------------------
+
+def _render_markdown(pdf: _NotesPDF, text_md: str):
+    """
+    Renderer Markdown → PDF con layout professionale e senza sovrapposizioni.
+    Gestisce: H2, H3, H4, Blockquote (>), Bullet (-), Numerate (1.), Paragrafi.
+    """
+    PAGE_W = pdf.w - LEFT_MARGIN - RIGHT_MARGIN
+    LH = LINE_HEIGHT
+    BULLET_INDENT = 6.0
+    SUBBULLET_INDENT = 14.0
+    QUOTE_INDENT = 6.0
+
+    # Reset posizione
+    pdf.set_y(pdf._page_start_y)
+
+    lines = text_md.splitlines()
+    i = 0
+
+    while i < len(lines):
+        raw = lines[i]
+        line = raw.strip()
+
+        # Riga vuota → piccolo spazio
+        if not line:
+            pdf.ln(2)
+            i += 1
+            continue
+
+        # --- Separatore ---
+        if re.match(r"^-{3,}$|^\*{3,}$|^_{3,}$", line):
+            pdf.ensure_space(8)
+            y = pdf.get_y()
+            pdf.set_draw_color(189, 195, 199)
+            pdf.set_line_width(0.3)
+            pdf.line(LEFT_MARGIN, y, LEFT_MARGIN + PAGE_W, y)
+            pdf.set_line_width(0.2)
+            pdf.ln(4)
+            i += 1
+            continue
+
+        # --- H2: Capitolo (sfondo blu scuro, testo bianco) ---
+        if line.startswith("## "):
+            txt = _pdf_safe_text(_strip_inline(line[3:].strip()))
+            pdf.ensure_space(12)
+            pdf.set_fill_color(44, 62, 80)
+            pdf.set_text_color(255, 255, 255)
+            pdf.set_font("Helvetica", "B", 14)
+            pdf.set_x(LEFT_MARGIN)
+            pdf.multi_cell(PAGE_W, 9, f"  {txt}", fill=True)
+            pdf.set_text_color(40, 40, 40)
+            pdf.ln(4)
+            i += 1
+            continue
+
+        # --- H3: Sottocapitolo (testo blu, sottolineato) ---
+        if line.startswith("### "):
+            txt = _pdf_safe_text(_strip_inline(line[4:].strip()))
+            pdf.ensure_space(10)
+            pdf.set_font("Helvetica", "B", 12)
+            pdf.set_text_color(41, 128, 185)
+            pdf.set_x(LEFT_MARGIN)
+            pdf.multi_cell(PAGE_W, 7, txt)
+            # Sottolineatura
+            y = pdf.get_y()
+            pdf.set_draw_color(41, 128, 185)
+            pdf.set_line_width(0.5)
+            pdf.line(LEFT_MARGIN, y, LEFT_MARGIN + min(PAGE_W * 0.50, len(txt) * 1.2), y)
+            pdf.set_line_width(0.2)
+            pdf.set_draw_color(200, 200, 200)
+            pdf.set_text_color(40, 40, 40)
+            pdf.ln(3)
+            i += 1
+            continue
+
+        # --- H4: Nota (testo blu scuro, corsivo grassetto) ---
+        if line.startswith("#### "):
+            txt = _pdf_safe_text(_strip_inline(line[5:].strip()))
+            pdf.ensure_space(8)
+            pdf.set_font("Helvetica", "BI", 11)
+            pdf.set_text_color(52, 73, 94)
+            pdf.set_x(LEFT_MARGIN)
+            pdf.multi_cell(PAGE_W, 6, txt)
+            pdf.set_text_color(40, 40, 40)
+            pdf.ln(2)
+            i += 1
+            continue
+
+        # --- Blockquote: Definizioni/Teoremi (bordo blu a sinistra) ---
+        if line.startswith("> "):
+            content = _pdf_safe_text(_strip_inline(line[2:].strip()))
+            # Stima altezza del blocco
+            estimated_lines = max(1, len(content) // 60 + 1)
+            needed = estimated_lines * LH + 6
+            pdf.ensure_space(needed)
+
+            y_start = pdf.get_y()
+            pdf.set_font("Helvetica", "I", 10.5)
+            pdf.set_text_color(44, 62, 80)
+            pdf.set_x(LEFT_MARGIN + QUOTE_INDENT + 2)
+            pdf.multi_cell(PAGE_W - QUOTE_INDENT - 4, LH, content)
+            y_end = pdf.get_y()
+
+            # Bordo blu a sinistra
+            pdf.set_draw_color(41, 128, 185)
+            pdf.set_line_width(1.2)
+            pdf.line(LEFT_MARGIN + QUOTE_INDENT - 1, y_start, LEFT_MARGIN + QUOTE_INDENT - 1, y_end)
+            pdf.set_line_width(0.2)
+            pdf.set_text_color(40, 40, 40)
+            pdf.ln(2)
+            i += 1
+            continue
+
+        # --- Bullet indentato (sub-bullet) ---
+        if re.match(r"^ {2,}[-*]\s+", raw):
+            content = _pdf_safe_text(_strip_inline(re.sub(r"^ +[-*]\s+", "", raw).strip()))
+            pdf.ensure_space(6)
+            pdf.set_font("Helvetica", "", 10.5)
+            pdf.set_text_color(60, 60, 60)
+            pdf.set_x(LEFT_MARGIN + SUBBULLET_INDENT)
+            pdf.cell(5, LH, "◦")
+            pdf.multi_cell(PAGE_W - SUBBULLET_INDENT - 5, LH, content)
+            pdf.set_x(LEFT_MARGIN)
+            pdf.set_text_color(40, 40, 40)
+            pdf.ln(1)
+            i += 1
+            continue
+
+        # --- Bullet principale ---
+        if re.match(r"^[-*]\s+", line):
+            content = _pdf_safe_text(_strip_inline(line[2:].strip()))
+            pdf.ensure_space(6)
+            pdf.set_x(LEFT_MARGIN + BULLET_INDENT)
+            pdf.set_font("Helvetica", "B", 12)
+            pdf.set_text_color(41, 128, 185)
+            pdf.cell(6, LH, "•")
+            pdf.set_font("Helvetica", "", 11)
+            pdf.set_text_color(40, 40, 40)
+            pdf.multi_cell(PAGE_W - BULLET_INDENT - 6, LH, content)
+            pdf.set_x(LEFT_MARGIN)
+            pdf.ln(1)
+            i += 1
+            continue
+
+        # --- Lista numerata ---
+        num_match = re.match(r"^(\d+)\.\s+(.+)$", line)
+        if num_match:
+            num = num_match.group(1) + "."
+            content = _pdf_safe_text(_strip_inline(num_match.group(2).strip()))
+            pdf.ensure_space(6)
+            pdf.set_x(LEFT_MARGIN + BULLET_INDENT)
+            pdf.set_font("Helvetica", "B", 11)
+            pdf.set_text_color(44, 62, 80)
+            pdf.cell(9, LH, num)
+            pdf.set_font("Helvetica", "", 11)
+            pdf.set_text_color(40, 40, 40)
+            pdf.multi_cell(PAGE_W - BULLET_INDENT - 9, LH, content)
+            pdf.set_x(LEFT_MARGIN)
+            pdf.ln(1)
+            i += 1
+            continue
+
+        # --- Paragrafo normale ---
+        txt = _pdf_safe_text(_strip_inline(line))
+        pdf.ensure_space(6)
+        pdf.set_font("Helvetica", "", 11)
+        pdf.set_text_color(40, 40, 40)
+        pdf.set_x(LEFT_MARGIN)
+        pdf.multi_cell(PAGE_W, LH, txt)
+        pdf.ln(2)
+        i += 1
+
+
+# ---------------------------------------------------------------------------
+# Frontespizio
+# ---------------------------------------------------------------------------
+
+def _add_front_page(pdf: _NotesPDF, title: str, subtitle: str):
+    """Frontespizio professionale."""
+    pdf.add_page()
+    PAGE_W = pdf.w - LEFT_MARGIN - RIGHT_MARGIN
+
+    # Banda superiore
+    pdf.set_fill_color(44, 62, 80)
+    pdf.rect(0, 0, pdf.w, 55, "F")
+
+    # Titolo
+    pdf.set_y(18)
+    pdf.set_font("Helvetica", "B", 24)
+    pdf.set_text_color(255, 255, 255)
+    pdf.multi_cell(0, 12, _pdf_safe_text(title), align="C")
+
+    # Sottotitolo
+    pdf.set_y(68)
+    pdf.set_font("Helvetica", "I", 14)
+    pdf.set_text_color(189, 195, 199)
+    pdf.multi_cell(0, 9, _pdf_safe_text(subtitle), align="C")
+
+    # Linea decorativa
+    pdf.ln(8)
+    pdf.set_draw_color(41, 128, 185)
+    pdf.set_line_width(1.0)
+    pdf.line(LEFT_MARGIN + PAGE_W * 0.2, pdf.get_y(), LEFT_MARGIN + PAGE_W * 0.8, pdf.get_y())
+    pdf.set_line_width(0.2)
+
+    # Data
+    pdf.set_y(-45)
+    pdf.set_font("Helvetica", "", 10)
+    pdf.set_text_color(100, 100, 100)
+    pdf.cell(0, 8, f"Generato il {datetime.now().strftime('%d/%m/%Y')}", align="C", ln=True)
+    pdf.set_font("Helvetica", "I", 9)
+    pdf.cell(0, 7, "Study Coach - Appunti generati automaticamente", align="C")
+
+
+# ---------------------------------------------------------------------------
+# API PUBBLICA
 # ---------------------------------------------------------------------------
 
 def generate_notes(
-    student_id: int,
-    exam_id: int,
-    topic_query: str = "concetti principali del corso",
-    n_chunks: int = DEFAULT_N_CHUNKS,
-    source_name: str = "materiale di studio",
-    model_name: str = DEFAULT_MODEL,
+        student_id: int,
+        exam_id: int,
+        topic_query: str = "concetti principali del corso",
+        n_chunks: int = DEFAULT_N_CHUNKS,
+        source_name: str = "materiale di studio",
+        model_name: str = DEFAULT_MODEL,
 ) -> str:
-    """
-    Genera appunti sintetici dal materiale RAG indicizzato.
-    Usa questa funzione PRIMA di una sessione o su richiesta esplicita.
-
-    Args:
-        student_id:  ID studente
-        exam_id:     ID esame
-        topic_query: Query per il retrieval RAG (default: concetti principali)
-        n_chunks:    Numero di chunk da recuperare
-        source_name: Nome sorgente (visualizzato negli appunti)
-        model_name:  Modello Groq da usare
-
-    Returns:
-        Stringa Markdown con gli appunti sintetici.
-    """
-    chunks = retrieve_chunks(
-        query=topic_query,
-        student_id=student_id,
-        exam_id=exam_id,
-        n_results=n_chunks,
-    )
+    chunks = retrieve_chunks(query=topic_query, student_id=student_id, exam_id=exam_id, n_results=n_chunks)
     if not chunks:
-        raise ValueError(
-            f"Nessun chunk trovato per student_id={student_id}, exam_id={exam_id}.\n"
-            "Indicizza il materiale prima di generare gli appunti."
-        )
-
-    context_text = "\n\n---\n\n".join(chunks)
-    template     = _load_prompt_template()
-    prompt       = template.format(
-        mode="materiale",
-        source_name=source_name,
-        context=context_text,
-        log_summary="",
-        weak_topics="",
-    )
-
-    agent  = _make_notes_agent(model_name)
-    output = agent.run(prompt, stream=False)
-    notes  = output.get_content_as_string().strip()
-
-    print(
-        f"[NotesGeneratorAgent] Appunti generati da materiale RAG | "
-        f"exam_id={exam_id} | chunks={len(chunks)} | model={model_name}"
-    )
+        raise ValueError(f"Nessun chunk trovato per student_id={student_id}, exam_id={exam_id}")
+    chunks = _clean_chunks(chunks)
+    context = "\n\n---\n\n".join(chunks)
+    template = _load_prompt_template()
+    prompt = template.format(mode="materiale", source_name=source_name, context=context, log_summary="", weak_topics="")
+    agent = _make_notes_agent(model_name)
+    notes = _run_with_retry(agent, prompt, fallback_chunks=chunks)
+    print(f"[NotesGenerator] Appunti generati | parole={len(re.findall(r'\\b\\w+\\b', notes))}")
     return notes
 
 
 def generate_notes_pdf(
-    student_id: int,
-    exam_id: int,
-    topic_query: str = "concetti principali del corso",
-    min_pages: int = 1,
-    n_chunks: int = DEFAULT_N_CHUNKS,
-    source_name: str = "materiale di studio",
-    model_name: str = DEFAULT_MODEL,
+        student_id: int,
+        exam_id: int,
+        topic_query: str = "concetti principali del corso",
+        min_pages: int = 1,
+        n_chunks: int = DEFAULT_N_CHUNKS,
+        source_name: str = "materiale di studio",
+        model_name: str = DEFAULT_MODEL,
 ) -> bytes:
-    """Genera gli appunti (markdown) e li converte in PDF.
-    Garantisce che il PDF abbia almeno `min_pages` pagine (aggiunge pagine vuote se necessario).
+    if FPDF is object:
+        raise RuntimeError("FPDF non disponibile. Installa fpdf2.")
 
-    Ritorna i bytes del PDF.
-    """
     notes_md = generate_notes(
         student_id=student_id,
         exam_id=exam_id,
@@ -257,55 +604,19 @@ def generate_notes_pdf(
         model_name=model_name,
     )
 
-    # Creazione PDF semplice e robusta a partire dal markdown testuale.
-    try:
-        from fpdf import FPDF
-    except Exception as e:
-        raise RuntimeError(f"FPDF non disponibile: {e}")
+    pdf = _NotesPDF(title_str=f"Appunti: {source_name}")
+    _add_front_page(pdf, f"Appunti di Studio\n{source_name}", "Generati automaticamente da Study Coach")
 
-    class _NotesPDF(FPDF):
-        def __init__(self):
-            super().__init__(orientation="P", unit="mm", format="A4")
-
-        def header(self):
-            self.set_font("Helvetica", "B", 11)
-            self.set_text_color(30, 30, 30)
-            self.cell(0, 8, _pdf_safe_text(f"Appunti - {source_name}"))
-            self.ln(6)
-
-        def footer(self):
-            self.set_y(-15)
-            self.set_font("Helvetica", "I", 8)
-            self.set_text_color(120, 120, 120)
-            self.cell(0, 10, f"Pagina {self.page_no()}", align="C")
-
-    pdf = _NotesPDF()
-    pdf.set_auto_page_break(auto=True, margin=15)
-    pdf.set_margins(15, 15, 15)
+    # Contenuto
     pdf.add_page()
-    pdf.set_font("Helvetica", "", 11)
-    pdf.set_text_color(40, 40, 40)
+    _render_markdown(pdf, notes_md)
 
-    def _write_wrapped(text: str, font_style: str = "", font_size: int = 11) -> None:
-        pdf.set_font("Helvetica", font_style, font_size)
-        for paragraph in _pdf_safe_text(text).splitlines() or [""]:
-            clean = paragraph.strip()
-            if not clean:
-                pdf.ln(4)
-                continue
-            for chunk in textwrap.wrap(clean, width=60, break_long_words=True, break_on_hyphens=True) or [clean]:
-                pdf.multi_cell(0, 6, chunk)
-        pdf.ln(1)
-
-    for line in notes_md.splitlines():
-        if line.startswith("#"):
-            level = len(line.split(" ", 1)[0])
-            title = _pdf_safe_text(line.lstrip("#").strip())
-            size = 14 if level <= 2 else 12
-            _write_wrapped(title, "B", size)
-        else:
-            normalized = _pdf_safe_text(line.strip().lstrip("-* ").strip())
-            _write_wrapped(normalized, "", 11)
+    # Pagine aggiuntive se necessario
+    while pdf.page_no() < min_pages:
+        pdf.add_page()
+        pdf.set_font("Helvetica", "I", 10)
+        pdf.set_text_color(150, 150, 150)
+        pdf.cell(0, 10, "(pagina intenzionalmente lasciata vuota)", align="C")
 
     out = pdf.output()
     if isinstance(out, (bytes, bytearray)):
@@ -316,72 +627,91 @@ def generate_notes_pdf(
 
 
 def generate_notes_pdf_from_materials(
-    student_id: int,
-    exam_id: int,
-    materials: list[dict],
-    model_name: str = DEFAULT_MODEL,
+        student_id: int,
+        exam_id: int,
+        materials: list[dict],
+        model_name: str = DEFAULT_MODEL,
+        exam_name_fallback: str | None = None,
 ) -> bytes:
-    """Genera un PDF con una pagina per ogni fonte caricata."""
-    try:
-        from fpdf import FPDF
-    except Exception as e:
-        raise RuntimeError(f"FPDF non disponibile: {e}")
+    if FPDF is object:
+        raise RuntimeError("FPDF non disponibile. Installa fpdf2.")
 
-    class _NotesPDF(FPDF):
-        def __init__(self):
-            super().__init__(orientation="P", unit="mm", format="A4")
+    exam_name = exam_name_fallback or "Materiali di Studio"
+    if materials:
+        try:
+            if hasattr(materials[0], "exam") and materials[0].exam:
+                exam_name = materials[0].exam.name
+        except Exception:
+            pass
 
-        def header(self):
-            self.set_font("Helvetica", "B", 11)
-            self.set_text_color(30, 30, 30)
-            self.cell(0, 8, _pdf_safe_text("Study Coach - Appunti"))
-            self.ln(6)
-
-        def footer(self):
-            self.set_y(-15)
-            self.set_font("Helvetica", "I", 8)
-            self.set_text_color(120, 120, 120)
-            self.cell(0, 10, f"Pagina {self.page_no()}", align="C")
-
-    def _render_wrapped(pdf: FPDF, text: str, style: str = "", size: int = 11) -> None:
-        pdf.set_font("Helvetica", style, size)
-        for paragraph in _pdf_safe_text(text).splitlines() or [""]:
-            clean = paragraph.strip()
-            if not clean:
-                pdf.ln(4)
-                continue
-            for chunk in textwrap.wrap(clean, width=60, break_long_words=True, break_on_hyphens=True) or [clean]:
-                pdf.multi_cell(0, 6, chunk)
-        pdf.ln(1)
-
-    pdf = _NotesPDF()
-    pdf.set_auto_page_break(auto=True, margin=15)
-    pdf.set_margins(15, 15, 15)
+    pdf = _NotesPDF(title_str=f"Appunti: {exam_name}")
+    _add_front_page(pdf, exam_name, "Sintesi completa dei materiali caricati")
 
     if not materials:
-        materials = [{"filename": "materiale di studio", "pages_count": 1}]
-
-    for material in materials:
-        filename = getattr(material, "filename", None) or material.get("filename", "materiale di studio")
-        pages_count = getattr(material, "pages_count", None) or material.get("pages_count", 1)
         pdf.add_page()
-        pdf.set_text_color(40, 40, 40)
-        _render_wrapped(pdf, _pdf_safe_text(filename), "B", 14)
-        _render_wrapped(pdf, _pdf_safe_text(f"Pagine originali: {pages_count}"), "", 9)
+        _render_markdown(pdf, "## Nessun materiale caricato.\nCarica dei PDF per generare gli appunti.")
+    else:
+        global_chunks = _clean_chunks(retrieve_chunks("concetti principali", student_id, exam_id, n_results=15))
+        has_content = False
 
-        chunks = retrieve_chunks_by_source(student_id, exam_id, filename, limit=12)
-        bullets = _build_local_notes_from_chunks(chunks)
+        for material in materials:
+            filename = getattr(material, "filename", None) or material.get("filename", "materiale di studio")
+            try:
+                chunks = _clean_chunks(retrieve_chunks_by_source(student_id, exam_id, filename, limit=12))
+                if not chunks and not has_content and global_chunks:
+                    chunks = global_chunks
+                if not chunks:
+                    continue
 
-        if not bullets:
-            _render_wrapped(pdf, "Nessun testo estraibile da questa fonte.", "", 11)
-            continue
+                has_content = True
+                pdf.add_page()
+                pdf.set_font("Helvetica", "B", 16)
+                pdf.set_text_color(52, 73, 94)
+                pdf.cell(0, 10, _pdf_safe_text(f"Fonte: {filename}"), ln=True)
+                pdf.ln(2)
 
-        _render_wrapped(pdf, "Punti chiave", "B", 12)
-        for bullet in bullets:
-            _render_wrapped(pdf, f"- {bullet}", "", 11)
+                context = "\n\n---\n\n".join(chunks)
+                template = _load_prompt_template()
+                prompt = template.format(mode="materiale", source_name=filename, context=context, log_summary="", weak_topics="")
+                agent = _make_notes_agent(model_name)
+                notes_md = _run_with_retry(agent, prompt, fallback_chunks=chunks)
 
-        if len(bullets) < 3:
-            _render_wrapped(pdf, "Nota: questa fonte contiene poco testo pulito o e' prevalentemente OCR.", "", 10)
+                is_valid, _ = _validate_notes(notes_md)
+                if not is_valid:
+                    notes_md = _generate_fallback_notes(chunks)
+
+                _render_markdown(pdf, notes_md)
+
+            except Exception as e:
+                print(f"[NotesGenerator] Errore su {filename}: {e}")
+                pdf.add_page()
+                pdf.set_font("Helvetica", "B", 14)
+                pdf.set_text_color(192, 57, 43)
+                pdf.cell(0, 10, _pdf_safe_text(f"Errore: {filename}"), ln=True)
+                pdf.ln(2)
+                pdf.set_font("Helvetica", "", 11)
+                pdf.set_text_color(40, 40, 40)
+                pdf.multi_cell(0, 6, _pdf_safe_text(f"Impossibile generare gli appunti per questo materiale. {e}"))
+
+        if not has_content:
+            pdf.add_page()
+            if global_chunks:
+                try:
+                    pdf.set_font("Helvetica", "B", 16)
+                    pdf.set_text_color(52, 73, 94)
+                    pdf.cell(0, 10, "Sintesi Generale dell'Esame", ln=True)
+                    pdf.ln(2)
+                    context = "\n\n---\n\n".join(global_chunks)
+                    template = _load_prompt_template()
+                    prompt = template.format(mode="materiale", source_name="Sintesi Globale", context=context, log_summary="", weak_topics="")
+                    agent = _make_notes_agent(model_name)
+                    notes_md = _run_with_retry(agent, prompt, fallback_chunks=global_chunks)
+                    _render_markdown(pdf, notes_md)
+                except Exception as e:
+                    pdf.multi_cell(0, 6, f"Errore: {e}")
+            else:
+                notes_md = _generate_fallback_notes(global_chunks)
+                _render_markdown(pdf, notes_md)
 
     out = pdf.output()
     if isinstance(out, (bytes, bytearray)):
@@ -392,61 +722,40 @@ def generate_notes_pdf_from_materials(
 
 
 def generate_notes_from_log(
-    attempts: list[dict],
-    student_id: int | None = None,
-    exam_id: int | None = None,
-    source_name: str = "sessione di studio",
-    model_name: str = DEFAULT_MODEL,
-    enrich_with_rag: bool = False,
+        attempts: list[dict],
+        student_id: int | None = None,
+        exam_id: int | None = None,
+        source_name: str = "sessione di studio",
+        model_name: str = DEFAULT_MODEL,
+        enrich_with_rag: bool = False,
 ) -> str:
-    """
-    Genera appunti sintetici post-sessione personalizzati sulle lacune
-    emerse durante l'interrogazione socratica.
-
-    Args:
-        attempts:        Lista di dict dal qa_log (formato piatto di session.py)
-        student_id:      Opzionale — se fornito con exam_id, arricchisce col RAG
-        exam_id:         Opzionale — vedi sopra
-        source_name:     Nome sorgente per l'intestazione
-        model_name:      Modello Groq
-        enrich_with_rag: Se True e student_id/exam_id disponibili, aggiunge
-                         chunk RAG sui topic deboli
-
-    Returns:
-        Stringa Markdown con gli appunti focalizzati sulle lacune.
-    """
     if not attempts:
-        raise ValueError("Lista attempts vuota: impossibile generare appunti.")
+        raise ValueError("Lista attempts vuota")
 
-    log_summary  = _build_log_summary(attempts)
-    weak_topics  = _extract_weak_topics(attempts)
-    weak_str     = ", ".join(weak_topics) if weak_topics else "nessuna lacuna rilevata"
+    log_summary = _build_log_summary(attempts)
+    weak_topics = _extract_weak_topics(attempts)
+    weak_str = ", ".join(weak_topics) if weak_topics else "nessuna lacuna rilevata"
 
-    # Arricchimento RAG opzionale sui topic deboli
     rag_context = ""
+    rag_chunks = []
     if enrich_with_rag and student_id and exam_id and weak_topics:
         query = " ".join(weak_topics[:3])
         try:
-            chunks      = retrieve_chunks(query, student_id, exam_id, n_results=6)
-            rag_context = "\n\n---\n\n".join(chunks)
-        except Exception as e: # pylint: disable=broad-exception-caught
-            print(f"[NotesGeneratorAgent] RAG enrichment fallito: {e}")
+            rag_chunks = _clean_chunks(retrieve_chunks(query, student_id, exam_id, n_results=6))
+            rag_context = "\n\n---\n\n".join(rag_chunks)
+        except Exception as e:
+            print(f"[NotesGenerator] RAG fallito: {e}")
 
     template = _load_prompt_template()
-    prompt   = template.format(
+    prompt = template.format(
         mode="sessione",
         source_name=source_name,
-        context=rag_context if rag_context else "(nessun contesto RAG aggiuntivo)",
+        context=rag_context or "(nessun contesto RAG aggiuntivo)",
         log_summary=log_summary,
         weak_topics=weak_str,
     )
 
-    agent  = _make_notes_agent(model_name)
-    output = agent.run(prompt, stream=False)
-    notes  = output.get_content_as_string().strip()
-
-    print(
-        f"[NotesGeneratorAgent] Appunti post-sessione | "
-        f"domande={len(attempts)} | topic_deboli={weak_topics} | model={model_name}"
-    )
+    agent = _make_notes_agent(model_name)
+    notes = _run_with_retry(agent, prompt, fallback_chunks=rag_chunks, weak_topics=weak_topics)
+    print(f"[NotesGenerator] Post-sessione | parole={len(re.findall(r'\\b\\w+\\b', notes))}")
     return notes

@@ -49,6 +49,13 @@ def render():
     <p style=\"color:#6b7280; margin-bottom:1.5rem;\">Azioni disponibili per l'esame.</p>
     """, unsafe_allow_html=True)
 
+    # ─── RECUPERA I MATERIALI GIÀ CARICATI ───────────────────────────────
+    db = SessionLocal()
+    try:
+        materials = db.query(Material).filter(Material.exam_id == exam['id']).all()
+    finally:
+        db.close()
+
     col_start, col_sources, col_notes, col_history = st.columns([1.2, 1.6, 1.6, 1])
 
     with col_start:
@@ -69,24 +76,38 @@ def render():
 
     with col_sources:
         st.markdown("**Aggiungi fonti (PDF)**")
-        # Permetti più file per esame
-        uploaded = st.file_uploader("Aggiungi PDF", type="pdf", key=f"exam_add_pdf_{exam['id']}", accept_multiple_files=True)
+
+        # Usa un contatore per cambiare la chiave del file_uploader dopo il caricamento
+        # così il widget viene ricreato e non mantiene i vecchi file.
+        if "upload_counter" not in st.session_state:
+            st.session_state.upload_counter = 0
+
+        upload_key = f"exam_add_pdf_{exam['id']}_{st.session_state.upload_counter}"
+        uploaded = st.file_uploader(
+            "Aggiungi PDF",
+            type="pdf",
+            key=upload_key,
+            accept_multiple_files=True,
+            label_visibility="collapsed"
+        )
+
         if uploaded:
             files: Iterable = uploaded if isinstance(uploaded, list) else [uploaded]
             upload_dir = Path(__file__).parent.parent.parent / "data" / "uploads"
             upload_dir.mkdir(parents=True, exist_ok=True)
+            success_files = []
             for file_obj in files:
                 try:
                     pdf_path = upload_dir / f"s{student_id}_e{exam['id']}_{file_obj.name}"
                     pdf_path.write_bytes(file_obj.read())
                 except Exception as e:
-                    st.error("Errore salvataggio file: %s" % e)
+                    st.error(f"Errore salvataggio file {file_obj.name}: {e}")
                     continue
 
-                with st.spinner("Indicizzazione PDF in corso..."):
+                with st.spinner(f"Indicizzazione {file_obj.name} in corso..."):
                     try:
                         stats = ingest_pdf(str(pdf_path), student_id, exam['id'])
-                        # Registra il materiale nel DB (pages_count, chunks_count)
+                        # Registra il materiale nel DB
                         db = SessionLocal()
                         try:
                             mat = Material(
@@ -100,9 +121,28 @@ def render():
                             db.commit()
                         finally:
                             db.close()
-                        st.success(f"✅ {stats['chunks']} chunk indicizzati da {stats['pages']} pagine per {file_obj.name}")
+                        success_files.append(file_obj.name)
                     except Exception as e:
-                        st.error(f"Errore indicizzazione: {e}")
+                        st.error(f"Errore indicizzazione {file_obj.name}: {e}")
+
+            if success_files:
+                st.success(f"✅ {len(success_files)} file caricati con successo: {', '.join(success_files)}")
+                # Cambia la chiave per il prossimo upload
+                st.session_state.upload_counter += 1
+                # Ricarica la pagina per mostrare i materiali aggiornati
+                st.rerun()
+
+        # ─── MOSTRA I MATERIALI GIÀ CARICATI ──────────────────────────────
+        st.markdown("---")
+        st.markdown("**Materiali caricati per questo esame:**")
+        if materials:
+            for m in materials:
+                st.markdown(
+                    f"📄 **{m.filename}**  "
+                    f"({m.pages_count or 0} pagine, {m.chunks_count or 0} chunk)"
+                )
+        else:
+            st.info("Nessun materiale caricato. Carica un PDF per iniziare.")
 
     with col_notes:
         if st.button("📋 Crea appunti (.pdf)", use_container_width=True, key=f"exam_notes_{exam['id']}"):
@@ -112,19 +152,13 @@ def render():
                 st.error("Modulo per generare appunti non disponibile.")
                 return
 
-            # Calcola il numero di fonti caricate per questo esame
-            db = SessionLocal()
-            try:
-                materials = db.query(Material).filter(Material.exam_id == exam['id']).all()
-            finally:
-                db.close()
-
             with st.spinner(f"Generazione PDF appunti per «{exam['name']}»..."):
                 try:
                     st.session_state[f"notes_pdf_file_{exam['id']}"] = generate_notes_pdf_from_materials(
                         student_id=student_id,
                         exam_id=exam['id'],
                         materials=materials,
+                        exam_name_fallback=exam['name']
                     )
                     st.session_state[f"notes_pdf_name_{exam['id']}"] = f"appunti_{exam['name'].replace(' ', '_')}.pdf"
                 except Exception as e:

@@ -14,16 +14,26 @@ from datetime import datetime, timezone
 from pathlib import Path
 import sys
 import traceback
+import unicodedata
 
 from fpdf import FPDF
 
 REPORTS_DIR = Path(__file__).parent.parent.parent / "reports"
 
-
 def _pdf_safe_text(value: object) -> str:
     """Converte testo in latin-1 sostituendo caratteri non supportati da FPDF core fonts."""
-    text = str(value).replace("—", "-")
-    return text.encode("latin-1", "replace").decode("latin-1")
+    text = str(value)
+    text = unicodedata.normalize("NFKD", text)
+    replacements = {
+        "’": "'", "‘": "'", "“": '"', "”": '"',
+        "–": "-", "—": "-", "…": "...", "•": "-",
+        "→": "->", "←": "<-", "✓": "OK", "✅": "OK",
+        "⚠": "!", "📘": "", "📄": "", "€": "Euro",
+    }
+    for src, dst in replacements.items():
+        text = text.replace(src, dst)
+    # Mantieni solo caratteri stampabili latin-1 (incluso accenti)
+    return "".join(ch for ch in text if ch == "\n" or ch == "\t" or (ord(ch) >= 32 and ord(ch) <= 255))
 
 # ✅ FIX: crea cartella reports con error handling robusto
 try:

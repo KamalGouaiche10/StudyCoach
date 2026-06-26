@@ -2,23 +2,11 @@
 Socratic Tutor Agent — Study Coach
 =====================================
 Gestisce il loop di interrogazione socratica per una singola domanda.
-
-Loop per domanda:
-    1. start(question)          → mostra domanda
-    2. submit_answer_1(ans)     → genera domanda guida (Agno GuideAgent)
-    3. submit_answer_2(ans)     → valuta 0-10 (Agno EvalAgent)
-    4. submit_contestation(arg) → rivaluta (Agno ContestAgent)  [opzionale]
-    5. close()                  → restituisce QuestionAttempt finale
-
-Ogni step usa un Agent Agno dedicato con prompt versionato.
-Prompt versionati:
-    - socratic_tutor_guide_v1.txt
-    - socratic_tutor_eval_v1.txt
-    - socratic_tutor_contest_v1.txt
 """
 
 import json
 import re
+import time
 from dataclasses import asdict, dataclass
 from enum import Enum, auto
 from pathlib import Path
@@ -36,13 +24,52 @@ load_dotenv()
 # Costanti
 # ---------------------------------------------------------------------------
 
-PROMPTS_DIR     = Path(__file__).parent / "prompts"
-PROMPT_GUIDE    = "socratic_tutor_guide_v1"
-PROMPT_EVAL     = "socratic_tutor_eval_v1"
-PROMPT_CONTEST  = "socratic_tutor_contest_v1"
+PROMPTS_DIR = Path(__file__).parent / "prompts"
+PROMPT_GUIDE = "socratic_tutor_guide_v1"
+PROMPT_EVAL = "socratic_tutor_eval_v1"
+PROMPT_CONTEST = "socratic_tutor_contest_v1"
 
-DEFAULT_MODEL    = "llama-3.3-70b-versatile"   # Groq
+DEFAULT_MODEL = "llama-3.3-70b-versatile"
 DEFAULT_N_CHUNKS = 5
+MAX_RETRIES = 3
+RETRY_DELAY = 3
+
+
+# ---------------------------------------------------------------------------
+# Helper per rate limit
+# ---------------------------------------------------------------------------
+
+def _is_rate_limit_error(raw: str) -> bool:
+    """Verifica se la risposta contiene un errore di rate limit."""
+    if not raw:
+        return False
+    lower = raw.lower()
+    return any([
+        'rate limit' in lower,
+        'rate_limit_exceeded' in lower,
+        'try again in' in lower,
+        '429' in raw,
+        'tokens per day' in lower,
+    ])
+
+
+def _parse_retry_after(raw: str) -> int | None:
+    """Estrae il tempo di attesa dal messaggio di errore (in secondi)."""
+    # Pattern: 1h18m31.392s
+    match = re.search(r'(?:try again in\s*)?(\d+)h(\d+)m(\d+\.?\d*)s', raw, re.IGNORECASE)
+    if match:
+        h, m, s = int(match.group(1)), int(match.group(2)), float(match.group(3))
+        return int(h * 3600 + m * 60 + s)
+    # Solo minuti
+    match = re.search(r'(\d+)\s*(?:minute|min|m)', raw, re.IGNORECASE)
+    if match:
+        return int(match.group(1)) * 60
+    # Solo secondi
+    match = re.search(r'(\d+)\s*(?:second|sec|s)', raw, re.IGNORECASE)
+    if match:
+        return int(match.group(1))
+    # Fallback
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -52,9 +79,9 @@ DEFAULT_N_CHUNKS = 5
 class TurnState(Enum):
     WAITING_ANSWER_1 = auto()
     WAITING_ANSWER_2 = auto()
-    EVALUATED        = auto()
-    CONTESTED        = auto()
-    CLOSED           = auto()
+    EVALUATED = auto()
+    CONTESTED = auto()
+    CLOSED = auto()
 
 
 @dataclass
@@ -128,7 +155,7 @@ def _parse_json(raw: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Agno agent factories — un agente per ruolo, stateless
+# Agno agent factories
 # ---------------------------------------------------------------------------
 
 def _guide_agent(model_name: str) -> Agent:
@@ -142,7 +169,6 @@ def _guide_agent(model_name: str) -> Agent:
             "Rispondi SOLO con JSON valido, senza markdown."
         ),
         markdown=False,
-
     )
 
 
@@ -156,7 +182,6 @@ def _eval_agent(model_name: str) -> Agent:
             "Rispondi SOLO con JSON valido, senza markdown."
         ),
         markdown=False,
-
     )
 
 
@@ -170,12 +195,11 @@ def _contest_agent(model_name: str) -> Agent:
             "Rispondi SOLO con JSON valido, senza markdown."
         ),
         markdown=False,
-
     )
 
 
 # ---------------------------------------------------------------------------
-# Step LLM — una funzione per step
+# Step LLM con retry e gestione rate limit
 # ---------------------------------------------------------------------------
 
 def _generate_guiding_question(
@@ -190,11 +214,37 @@ def _generate_guiding_question(
         context_chunks="\n\n---\n\n".join(context_chunks),
     )
     agent = _guide_agent(model_name)
-    output = agent.run(prompt, stream=False)
-    data = _parse_json(output.get_content_as_string())
-    if "guiding_question" not in data:
-        raise ValueError(f"Risposta mancante di 'guiding_question': {data}")
-    return data
+
+    for attempt_num in range(MAX_RETRIES):
+        try:
+            output = agent.run(prompt, stream=False)
+            raw = output.get_content_as_string()
+
+            if _is_rate_limit_error(raw):
+                wait = _parse_retry_after(raw)
+                if wait and wait > 0:
+                    print(f"[SocraticGuideAgent] Rate limit, attendo {wait}s...")
+                    time.sleep(min(wait, 60))  # al massimo 60s per non bloccare troppo
+                else:
+                    time.sleep(RETRY_DELAY)
+                continue
+
+            data = _parse_json(raw)
+            if "guiding_question" not in data:
+                raise ValueError(f"Risposta mancante di 'guiding_question': {data}")
+            return data
+
+        except Exception as e:
+            print(f"[SocraticGuideAgent] Tentativo {attempt_num+1} fallito: {e}")
+            if attempt_num < MAX_RETRIES - 1:
+                time.sleep(RETRY_DELAY)
+            else:
+                raise RuntimeError(
+                    f"Impossibile generare la domanda guida dopo {MAX_RETRIES} tentativi. "
+                    f"Ultimo errore: {e}"
+                ) from e
+
+    raise RuntimeError("Tentativi esauriti per la generazione della domanda guida.")
 
 
 def _evaluate(
@@ -211,17 +261,42 @@ def _evaluate(
         context_chunks="\n\n---\n\n".join(context_chunks),
     )
     agent = _eval_agent(model_name)
-    output = agent.run(prompt, stream=False)
-    data = _parse_json(output.get_content_as_string())
 
-    score = max(0, min(10, int(data.get("score", 0))))
-    return EvaluationResult(
-        score=score,
-        motivation=data.get("motivation", ""),
-        correct_points=data.get("correct_points", []),
-        missing_points=data.get("missing_points", []),
-        improvement_after_guidance=data.get("improvement_after_guidance", ""),
-    )
+    for attempt_num in range(MAX_RETRIES):
+        try:
+            output = agent.run(prompt, stream=False)
+            raw = output.get_content_as_string()
+
+            if _is_rate_limit_error(raw):
+                wait = _parse_retry_after(raw)
+                if wait and wait > 0:
+                    print(f"[EvaluatorAgent] Rate limit, attendo {wait}s...")
+                    time.sleep(min(wait, 60))
+                else:
+                    time.sleep(RETRY_DELAY)
+                continue
+
+            data = _parse_json(raw)
+            score = max(0, min(10, int(data.get("score", 0))))
+            return EvaluationResult(
+                score=score,
+                motivation=data.get("motivation", ""),
+                correct_points=data.get("correct_points", []),
+                missing_points=data.get("missing_points", []),
+                improvement_after_guidance=data.get("improvement_after_guidance", ""),
+            )
+
+        except Exception as e:
+            print(f"[EvaluatorAgent] Tentativo {attempt_num+1} fallito: {e}")
+            if attempt_num < MAX_RETRIES - 1:
+                time.sleep(RETRY_DELAY)
+            else:
+                raise RuntimeError(
+                    f"Impossibile valutare dopo {MAX_RETRIES} tentativi. "
+                    f"Ultimo errore: {e}"
+                ) from e
+
+    raise RuntimeError("Tentativi esauriti per la valutazione.")
 
 
 def _re_evaluate_after_contestation(
@@ -231,6 +306,7 @@ def _re_evaluate_after_contestation(
 ) -> ContestationResult:
     if attempt.evaluation is None:
         raise ValueError("Nessuna valutazione iniziale: impossibile rivalutare.")
+
     template = _load_prompt(PROMPT_CONTEST)
     prompt = template.format(
         question=attempt.question_text,
@@ -243,20 +319,45 @@ def _re_evaluate_after_contestation(
         context_chunks="\n\n---\n\n".join(context_chunks),
     )
     agent = _contest_agent(model_name)
-    output = agent.run(prompt, stream=False)
-    data = _parse_json(output.get_content_as_string())
 
-    final_score = max(0, min(10, int(data.get("final_score", attempt.evaluation.score))))
-    delta = final_score - attempt.evaluation.score
+    for attempt_num in range(MAX_RETRIES):
+        try:
+            output = agent.run(prompt, stream=False)
+            raw = output.get_content_as_string()
 
-    return ContestationResult(
-        final_score=final_score,
-        score_changed=delta != 0,
-        score_delta=delta,
-        contestation_assessment=data.get("contestation_assessment", "non_valido"),
-        final_motivation=data.get("final_motivation", ""),
-        response_to_student=data.get("response_to_student", ""),
-    )
+            if _is_rate_limit_error(raw):
+                wait = _parse_retry_after(raw)
+                if wait and wait > 0:
+                    print(f"[ContestationAgent] Rate limit, attendo {wait}s...")
+                    time.sleep(min(wait, 60))
+                else:
+                    time.sleep(RETRY_DELAY)
+                continue
+
+            data = _parse_json(raw)
+            final_score = max(0, min(10, int(data.get("final_score", attempt.evaluation.score))))
+            delta = final_score - attempt.evaluation.score
+
+            return ContestationResult(
+                final_score=final_score,
+                score_changed=delta != 0,
+                score_delta=delta,
+                contestation_assessment=data.get("contestation_assessment", "non_valido"),
+                final_motivation=data.get("final_motivation", ""),
+                response_to_student=data.get("response_to_student", ""),
+            )
+
+        except Exception as e:
+            print(f"[ContestationAgent] Tentativo {attempt_num+1} fallito: {e}")
+            if attempt_num < MAX_RETRIES - 1:
+                time.sleep(RETRY_DELAY)
+            else:
+                raise RuntimeError(
+                    f"Impossibile rivalutare dopo {MAX_RETRIES} tentativi. "
+                    f"Ultimo errore: {e}"
+                ) from e
+
+    raise RuntimeError("Tentativi esauriti per la rivalutazione.")
 
 
 # ---------------------------------------------------------------------------
@@ -266,14 +367,6 @@ def _re_evaluate_after_contestation(
 class SocraticTutor:
     """
     Gestisce il loop socratico per una singola domanda usando Agno agents.
-
-    Utilizzo:
-        tutor = SocraticTutor(student_id=1, exam_id=3)
-        tutor.start(question_dict)
-        tutor.submit_answer_1("...")   → domanda guida
-        tutor.submit_answer_2("...")   → valutazione
-        tutor.submit_contestation("...") → rivalutazione (opzionale)
-        tutor.close()                  → QuestionAttempt finale
     """
 
     def __init__(
@@ -283,10 +376,10 @@ class SocraticTutor:
         model_name: str = DEFAULT_MODEL,
         n_chunks: int = DEFAULT_N_CHUNKS,
     ):
-        self.student_id    = student_id
-        self.exam_id       = exam_id
-        self.model_name    = model_name
-        self.n_chunks      = n_chunks
+        self.student_id = student_id
+        self.exam_id = exam_id
+        self.model_name = model_name
+        self.n_chunks = n_chunks
         self.attempt: QuestionAttempt | None = None
         self._context_cache: list[str] = []
 
@@ -312,10 +405,10 @@ class SocraticTutor:
         attempt.student_answer_1 = answer.strip()
 
         data = _generate_guiding_question(attempt, self._context_cache, self.model_name)
-        attempt.guiding_question  = data["guiding_question"]
+        attempt.guiding_question = data["guiding_question"]
         attempt.positive_feedback = data.get("positive_feedback", "")
-        attempt.focus_area        = data.get("focus_area", "")
-        attempt.state             = TurnState.WAITING_ANSWER_2
+        attempt.focus_area = data.get("focus_area", "")
+        attempt.state = TurnState.WAITING_ANSWER_2
 
         print(f"[SocraticGuideAgent] focus={attempt.focus_area} | q_id={attempt.question_id}")
         return {
@@ -329,9 +422,9 @@ class SocraticTutor:
         attempt = cast(QuestionAttempt, self.attempt)
         attempt.student_answer_2 = answer.strip()
 
-        eval_result    = _evaluate(attempt, self._context_cache, self.model_name)
+        eval_result = _evaluate(attempt, self._context_cache, self.model_name)
         attempt.evaluation = eval_result
-        attempt.state  = TurnState.EVALUATED
+        attempt.state = TurnState.EVALUATED
 
         print(f"[EvaluatorAgent] score={eval_result.score}/10 | q_id={attempt.question_id}")
         return {
@@ -348,9 +441,9 @@ class SocraticTutor:
         attempt = cast(QuestionAttempt, self.attempt)
         attempt.contestation_text = argumentation.strip()
 
-        contest_result       = _re_evaluate_after_contestation(attempt, self._context_cache, self.model_name)
+        contest_result = _re_evaluate_after_contestation(attempt, self._context_cache, self.model_name)
         attempt.contestation_result = contest_result
-        attempt.state        = TurnState.CONTESTED
+        attempt.state = TurnState.CONTESTED
 
         print(
             f"[ContestationAgent] {contest_result.contestation_assessment} | "
