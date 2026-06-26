@@ -34,6 +34,18 @@ DEFAULT_N_CHUNKS = 5
 MAX_RETRIES = 3
 RETRY_DELAY = 3
 
+NON_ANSWER_PATTERNS = (
+    r"\bnon\s+so\b",
+    r"\bnon\s+lo\s+so\b",
+    r"\bnon\s+saprei\b",
+    r"\bboh\b",
+    r"\bnon\s+ricordo\b",
+    r"\bnon\s+ne\s+ho\s+idea\b",
+    r"\bnessuna\s+idea\b",
+    r"\bidk\b",
+    r"\bi\s+don'?t\s+know\b",
+)
+
 
 # ---------------------------------------------------------------------------
 # Helper per rate limit
@@ -152,6 +164,38 @@ def _parse_json(raw: str) -> dict:
             f"JSON non valido dal modello.\nErrore: {e}\n"
             f"Risposta (500 char):\n{raw[:500]}"
         ) from e
+
+
+def _is_non_answer(text: str) -> bool:
+    normalized = " ".join(text.lower().strip().split())
+    if not normalized:
+        return True
+    return any(re.search(pattern, normalized) for pattern in NON_ANSWER_PATTERNS)
+
+
+def _apply_severity_guardrails(attempt: QuestionAttempt, evaluation: EvaluationResult) -> EvaluationResult:
+    if not _is_non_answer(attempt.student_answer_2):
+        return evaluation
+
+    missing_points = list(evaluation.missing_points)
+    strict_missing = "Risposta finale non valutabile: assenza di contenuto disciplinare verificabile."
+    if strict_missing not in missing_points:
+        missing_points.append(strict_missing)
+
+    strict_motivation = (
+        "Valutazione severa applicata: la seconda risposta e' una non-risposta "
+        "(es. 'non so') e non dimostra comprensione del contenuto."
+    )
+    if evaluation.motivation:
+        strict_motivation = f"{strict_motivation} {evaluation.motivation}"
+
+    return EvaluationResult(
+        score=0,
+        motivation=strict_motivation,
+        correct_points=evaluation.correct_points,
+        missing_points=missing_points,
+        improvement_after_guidance=evaluation.improvement_after_guidance,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -278,13 +322,14 @@ def _evaluate(
 
             data = _parse_json(raw)
             score = max(0, min(10, int(data.get("score", 0))))
-            return EvaluationResult(
+            evaluation = EvaluationResult(
                 score=score,
                 motivation=data.get("motivation", ""),
                 correct_points=data.get("correct_points", []),
                 missing_points=data.get("missing_points", []),
                 improvement_after_guidance=data.get("improvement_after_guidance", ""),
             )
+            return _apply_severity_guardrails(attempt, evaluation)
 
         except Exception as e:
             print(f"[EvaluatorAgent] Tentativo {attempt_num+1} fallito: {e}")
@@ -336,6 +381,8 @@ def _re_evaluate_after_contestation(
 
             data = _parse_json(raw)
             final_score = max(0, min(10, int(data.get("final_score", attempt.evaluation.score))))
+            if _is_non_answer(attempt.student_answer_2):
+                final_score = 0
             delta = final_score - attempt.evaluation.score
 
             return ContestationResult(

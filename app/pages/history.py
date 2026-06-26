@@ -127,12 +127,30 @@ def _get_all_exams(student_id: int) -> list:
 def _get_sessions(exam_id: int) -> list:
     db = SessionLocal()
     try:
+        # Pulisce automaticamente le sessioni avviate ma senza voto finale.
+        deleted = (
+            db.query(DbSession)
+            .filter(
+                DbSession.exam_id == exam_id,
+                DbSession.started_at.is_not(None),
+                DbSession.score_total.is_(None),
+            )
+            .delete(synchronize_session=False)
+        )
+        if deleted:
+            logger.info("Deleted %s started sessions without score for exam_id=%s", deleted, exam_id)
+            db.commit()
+
         return (
             db.query(DbSession)
             .filter(DbSession.exam_id == exam_id)
             .order_by(DbSession.started_at.desc())
             .all()
         )
+    except SQLAlchemyError:
+        logger.exception("Failed to load sessions for exam_id=%s", exam_id)
+        db.rollback()
+        return []
     finally:
         db.close()
 

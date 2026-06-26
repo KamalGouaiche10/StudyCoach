@@ -526,6 +526,13 @@ def list_sessions(
 ) -> SessionListResponse:
     db = SessionLocal()
     try:
+        db.query(DbSession).filter(
+            DbSession.exam_id == exam_id,
+            DbSession.started_at.is_not(None),
+            DbSession.score_total.is_(None),
+        ).delete(synchronize_session=False)
+        db.commit()
+
         sessions = (
             db.query(DbSession)
             .filter(DbSession.exam_id == exam_id)

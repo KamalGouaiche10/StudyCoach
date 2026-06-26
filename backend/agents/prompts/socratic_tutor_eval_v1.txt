@@ -28,6 +28,11 @@ Criteri di valutazione:
 - 8-9: risposta buona, comprensione solida con qualche imprecisione
 - 10: risposta eccellente, comprensione profonda e completa
 
+Regole di severita' obbligatorie:
+- Se la SECONDA RISPOSTA e' una non-risposta ("non so", "boh", "idk", "non ricordo", ecc.), assegna score 0.
+- Se la SECONDA RISPOSTA non contiene affermazioni disciplinari verificabili nel materiale, il punteggio massimo e' 1.
+- Non assegnare punti per frasi vaghe o meta-commenti sullo studio.
+
 Rispondi SOLO con un JSON valido, senza markdown:
 {{
   "score": 7,
