@@ -145,6 +145,3 @@ Ogni scelta fatta dagli agenti è stata validata e contestualizzata per assicura
 2.  **La Call**: Durante la call si effettua una demo live (caricamento PDF -> quiz -> sessione socratic -> report). Il professore valuta la solidità dell'architettura e l'uso sensato degli agenti.
 3.  **Approvazione**: Se il progetto è approvato, il professore si prende alcuni giorni per assegnare il voto.
 4.  **Parte Scritta**: Solo dopo l'approvazione del progetto è possibile sostenere la prova scritta.
-
----
-*Documento aggiornato al 2026-06-26*

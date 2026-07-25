@@ -4,7 +4,23 @@ Study Coach — Entry point Streamlit
 Avvia con: streamlit run app/main.py
 """
 
+import sys
+from pathlib import Path
+
 import streamlit as st
+
+# Aggiunge il root al path per import backend (session_cookie, db.models, ...)
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from backend.db.models import init_db  # pylint: disable=wrong-import-position
+from backend.session_cookie import (  # pylint: disable=wrong-import-position
+    render_clear_cookie,
+    render_cookie_autologin_probe,
+    verify_token,
+)
+
+# Crea le tabelle (e applica la migrazione di session_token) prima di tutto.
+init_db()
 
 # ── Configurazione pagina ──────────────────────────────────────────────────
 st.set_page_config(
@@ -129,6 +145,29 @@ defaults = {
 for k, v in defaults.items():
     if k not in st.session_state:
         st.session_state[k] = v
+
+# ── Login automatico da cookie persistente ─────────────────────────────────
+# Se lo studente non risulta autenticato in session_state (es. dopo un
+# refresh forte, un riavvio del browser o una disconnessione del websocket
+# che ha azzerato lo stato), proviamo a recuperare il login dal cookie del
+# browser invece di rimandarlo forzatamente alla pagina di login.
+if not st.session_state.authenticated:
+    token = st.query_params.get("token")
+    if token:
+        student = verify_token(token)
+        if student:
+            st.session_state.authenticated = True
+            st.session_state.student_id    = student.id
+            st.session_state.username      = student.username
+            st.session_state.current_page  = "upload"
+        else:
+            # Token non valido/scaduto lato server: ripulisci anche il
+            # cookie lato browser per evitare tentativi di auto-login
+            # ripetuti ad ogni futuro caricamento.
+            render_clear_cookie()
+        st.query_params.clear()
+    else:
+        render_cookie_autologin_probe()
 
 # ── Router ────────────────────────────────────────────────────────────────
 page = st.session_state.current_page

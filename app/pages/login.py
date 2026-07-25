@@ -13,6 +13,7 @@ import streamlit as st
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from backend.db.models import SessionLocal, Student, init_db # pylint: disable=wrong-import-position
+from backend.session_cookie import get_or_create_token, render_set_cookie # pylint: disable=wrong-import-position
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
@@ -128,6 +129,9 @@ def render():
             if st.button("Accedi", type="primary", use_container_width=True, key="btn_login"):
                 ok, msg = _login(username, password)
                 if ok:
+                    token = get_or_create_token(st.session_state.student_id)
+                    if token:
+                        render_set_cookie(token)
                     st.success("Bentornato!")
                     st.rerun()
                 else:
@@ -145,6 +149,9 @@ def render():
             if st.button("Crea account", type="primary", use_container_width=True, key="btn_reg"):
                 ok, msg = _register(new_user, new_pwd, new_pwd2)
                 if ok:
+                    token = get_or_create_token(st.session_state.student_id)
+                    if token:
+                        render_set_cookie(token)
                     st.success("Account creato! Benvenuto 🎉")
                     st.rerun()
                 else:

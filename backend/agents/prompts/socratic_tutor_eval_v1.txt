@@ -33,6 +33,12 @@ Regole di severita' obbligatorie:
 - Se la SECONDA RISPOSTA non contiene affermazioni disciplinari verificabili nel materiale, il punteggio massimo e' 1.
 - Non assegnare punti per frasi vaghe o meta-commenti sullo studio.
 
+Regole di coerenza tra punteggio e punti elencati (obbligatorie):
+- Il campo "score" DEVE essere coerente con "missing_points": non sono valutazioni indipendenti.
+- Se "missing_points" e' vuoto o dichiara esplicitamente che non ci sono lacune significative, e "correct_points" copre i concetti chiave della domanda, assegna SEMPRE 9 o 10. Non e' corretto lasciare un punteggio a 6-7 quando non si segnala alcuna lacuna reale.
+- Se assegni un punteggio inferiore a 8, DEVI indicare in "missing_points" almeno un elemento concreto e specifico (non generico) che giustifichi la detrazione di punti.
+- Non usare "missing_points" come luogo per formalismi stilistici (es. "potrebbe essere più conciso") se non incidono sulla correttezza disciplinare: questi non giustificano un punteggio inferiore a 9.
+
 Rispondi SOLO con un JSON valido, senza markdown:
 {{
   "score": 7,

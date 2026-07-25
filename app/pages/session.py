@@ -94,7 +94,7 @@ def _navbar() -> None:
         """, unsafe_allow_html=True)
     with col2:
         if st.button("← Esci", use_container_width=True):
-            # FIX — se c'è una sessione parzialmente completata,
+            # se c'è una sessione parzialmente completata,
             # chiude la sessione nel DB (ended_at=now, qa_log parziale)
             # così non appare come "Non completata" senza dati in history.
             sess = st.session_state.get("current_session")
@@ -108,7 +108,7 @@ def _navbar() -> None:
 
 def _mark_session_interrupted(sess: dict) -> None:
     """
-    FIX — Marca una sessione interrotta (uscita prematura) nel DB:
+     Marca una sessione interrotta (uscita prematura) nel DB:
     - imposta ended_at = now
     - salva il qa_log parziale (le domande già risposte)
     - NON genera report né imposta score_total (rimane NULL)
@@ -182,17 +182,12 @@ def _create_db_session(exam_id: int) -> int:
         db.close()
 
 
-def _save_session(
-    session_id: int,
-    attempts: list,
-    engine: AdaptiveEngine,
-    exam: dict,
-) -> Optional[str]:
+def _save_session(session_id: int,attempts: list,engine: AdaptiveEngine,exam: dict,) -> Optional[str]:
     """
     Salva la sessione completata nel DB e genera report PDF + MD.
     Restituisce il path assoluto del PDF, o None in caso di errore.
 
-    FIX: controlla che la sessione non sia già stata salvata (ended_at
+     : controlla che la sessione non sia già stata salvata (ended_at
     già impostato) per evitare doppi salvataggi in caso di rerun multipli.
     """
     db = SessionLocal()
@@ -567,7 +562,7 @@ def _close_and_advance(
     st.session_state.pop("_eval_result", None)
     st.session_state.pop("_contest_result", None)
 
-    # FIX — salva la sessione appena finisce l'ultima domanda.
+    # salva la sessione appena finisce l'ultima domanda.
     # Il controllo ended_at in _save_session evita doppi salvataggi
     # in caso di rerun successivi di Streamlit.
     if not sess["remaining"]:
@@ -588,7 +583,7 @@ def _render_session_complete() -> None:
     scores: list  = sess["scores"]
     avg:    float = round(sum(scores) / len(scores), 1) if scores else 0.0
 
-    # FIX — tenta il salvataggio anche qui, nel caso _close_and_advance
+    # tenta il salvataggio anche qui, nel caso _close_and_advance
     # non l'avesse completato (edge case: rerun multipli o sessione
     # arrivata a questa fase senza passare da _close_and_advance).
     engine: Optional[AdaptiveEngine] = st.session_state.get("adaptive_engine")

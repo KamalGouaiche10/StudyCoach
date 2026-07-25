@@ -31,7 +31,6 @@ PROMPT_CONTEST = "socratic_tutor_contest_v1"
 
 DEFAULT_MODEL = "llama-3.3-70b-versatile"
 DEFAULT_N_CHUNKS = 5
-MAX_RETRIES = 3
 RETRY_DELAY = 3
 
 NON_ANSWER_PATTERNS = (
@@ -198,6 +197,64 @@ def _apply_severity_guardrails(attempt: QuestionAttempt, evaluation: EvaluationR
     )
 
 
+# Frasi con cui il valutatore dichiara esplicitamente l'assenza di lacune,
+# pur non lasciando "missing_points" tecnicamente vuoto (es. una singola
+# voce come "nessun punto significativo mancante").
+NO_GAPS_PATTERNS = (
+    r"nessun\s+punto\s+(significativo\s+)?mancante",
+    r"nessuna\s+lacuna",
+    r"non\s+ci\s+sono\s+lacune",
+    r"tutti\s+i\s+punti\s+(chiave\s+)?(sono\s+)?(corretti|presenti|coperti)",
+    r"nessun\s+elemento\s+mancante",
+)
+
+
+def _has_no_real_gaps(missing_points: list[str]) -> bool:
+    """
+    True se la lista "missing_points" non descrive alcuna lacuna reale:
+    o è vuota, o contiene solo frasi che dichiarano esplicitamente
+    l'assenza di lacune.
+    """
+    if not missing_points:
+        return True
+    for point in missing_points:
+        normalized = " ".join(str(point).lower().strip().split())
+        if not normalized:
+            continue
+        if not any(re.search(pattern, normalized) for pattern in NO_GAPS_PATTERNS):
+            return False
+    return True
+
+
+def _apply_consistency_guardrails(evaluation: EvaluationResult) -> EvaluationResult:
+    """
+    Garantisce coerenza tra punteggio e lacune segnalate: se il valutatore
+    non ha indicato alcuna lacuna disciplinare reale, il punteggio non può
+    restare in una fascia "insufficiente/sufficiente" (es. 6-7). Questo
+    corregge deterministicamente il caso in cui l'LLM elenca tutti i punti
+    come corretti e nessun punto mancante, ma assegna comunque un voto
+    parziale in modo incoerente.
+    """
+    if evaluation.score >= 9:
+        return evaluation
+    if not _has_no_real_gaps(evaluation.missing_points):
+        return evaluation
+
+    note = (
+        "Punteggio corretto automaticamente a 9/10 per coerenza: la valutazione "
+        "non ha segnalato alcuna lacuna disciplinare significativa."
+    )
+    motivation = f"{evaluation.motivation} {note}" if evaluation.motivation else note
+
+    return EvaluationResult(
+        score=9,
+        motivation=motivation,
+        correct_points=evaluation.correct_points,
+        missing_points=evaluation.missing_points,
+        improvement_after_guidance=evaluation.improvement_after_guidance,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Agno agent factories
 # ---------------------------------------------------------------------------
@@ -259,7 +316,9 @@ def _generate_guiding_question(
     )
     agent = _guide_agent(model_name)
 
-    for attempt_num in range(MAX_RETRIES):
+    attempt_num = 0
+    while True:
+        attempt_num += 1
         try:
             output = agent.run(prompt, stream=False)
             raw = output.get_content_as_string()
@@ -279,16 +338,9 @@ def _generate_guiding_question(
             return data
 
         except Exception as e:
-            print(f"[SocraticGuideAgent] Tentativo {attempt_num+1} fallito: {e}")
-            if attempt_num < MAX_RETRIES - 1:
-                time.sleep(RETRY_DELAY)
-            else:
-                raise RuntimeError(
-                    f"Impossibile generare la domanda guida dopo {MAX_RETRIES} tentativi. "
-                    f"Ultimo errore: {e}"
-                ) from e
-
-    raise RuntimeError("Tentativi esauriti per la generazione della domanda guida.")
+            print(f"[SocraticGuideAgent] Tentativo {attempt_num} fallito: {e}. Ritento...")
+            time.sleep(RETRY_DELAY)
+            continue
 
 
 def _evaluate(
@@ -306,7 +358,9 @@ def _evaluate(
     )
     agent = _eval_agent(model_name)
 
-    for attempt_num in range(MAX_RETRIES):
+    attempt_num = 0
+    while True:
+        attempt_num += 1
         try:
             output = agent.run(prompt, stream=False)
             raw = output.get_content_as_string()
@@ -329,19 +383,14 @@ def _evaluate(
                 missing_points=data.get("missing_points", []),
                 improvement_after_guidance=data.get("improvement_after_guidance", ""),
             )
-            return _apply_severity_guardrails(attempt, evaluation)
+            evaluation = _apply_severity_guardrails(attempt, evaluation)
+            evaluation = _apply_consistency_guardrails(evaluation)
+            return evaluation
 
         except Exception as e:
-            print(f"[EvaluatorAgent] Tentativo {attempt_num+1} fallito: {e}")
-            if attempt_num < MAX_RETRIES - 1:
-                time.sleep(RETRY_DELAY)
-            else:
-                raise RuntimeError(
-                    f"Impossibile valutare dopo {MAX_RETRIES} tentativi. "
-                    f"Ultimo errore: {e}"
-                ) from e
-
-    raise RuntimeError("Tentativi esauriti per la valutazione.")
+            print(f"[EvaluatorAgent] Tentativo {attempt_num} fallito: {e}. Ritento...")
+            time.sleep(RETRY_DELAY)
+            continue
 
 
 def _re_evaluate_after_contestation(
@@ -365,7 +414,9 @@ def _re_evaluate_after_contestation(
     )
     agent = _contest_agent(model_name)
 
-    for attempt_num in range(MAX_RETRIES):
+    attempt_num = 0
+    while True:
+        attempt_num += 1
         try:
             output = agent.run(prompt, stream=False)
             raw = output.get_content_as_string()
@@ -395,16 +446,9 @@ def _re_evaluate_after_contestation(
             )
 
         except Exception as e:
-            print(f"[ContestationAgent] Tentativo {attempt_num+1} fallito: {e}")
-            if attempt_num < MAX_RETRIES - 1:
-                time.sleep(RETRY_DELAY)
-            else:
-                raise RuntimeError(
-                    f"Impossibile rivalutare dopo {MAX_RETRIES} tentativi. "
-                    f"Ultimo errore: {e}"
-                ) from e
-
-    raise RuntimeError("Tentativi esauriti per la rivalutazione.")
+            print(f"[ContestationAgent] Tentativo {attempt_num} fallito: {e}. Ritento...")
+            time.sleep(RETRY_DELAY)
+            continue
 
 
 # ---------------------------------------------------------------------------

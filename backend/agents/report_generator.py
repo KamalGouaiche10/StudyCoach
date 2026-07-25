@@ -12,8 +12,6 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
-import sys
-import traceback
 import unicodedata
 
 from fpdf import FPDF
@@ -35,24 +33,12 @@ def _pdf_safe_text(value: object) -> str:
     # Mantieni solo caratteri stampabili latin-1 (incluso accenti)
     return "".join(ch for ch in text if ch == "\n" or ch == "\t" or (ord(ch) >= 32 and ord(ch) <= 255))
 
-# ✅ FIX: crea cartella reports con error handling robusto
-try:
-    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-    # Verifica che sia scrivibile
-    test_file = REPORTS_DIR / ".write_test"
-    test_file.write_text("test")
-    test_file.unlink()
-except (OSError, IOError) as e: # pylint: disable=broad-exception-caught
-    print(f"[ReportGenerator] ⚠️ Errore creazione/verifica cartella reports: {e}", file=sys.stderr)
-    # Fallback a una cartella temporanea
-    import tempfile
-    REPORTS_DIR = Path(tempfile.gettempdir()) / "study_coach_reports"
-    try:
-        REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-        print(f"[ReportGenerator] Fallback a: {REPORTS_DIR}", file=sys.stderr)
-    except (OSError, IOError) as e2:
-        print(f"[ReportGenerator] ❌ Impossibile creare cartella fallback: {e2}", file=sys.stderr)
-        REPORTS_DIR = None
+# Crea la cartella reports. Nessun fallback: se la cartella non può essere
+# creata o non è scrivibile, l'errore si propaga esplicitamente all'avvio.
+REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+test_file = REPORTS_DIR / ".write_test"
+test_file.write_text("test")
+test_file.unlink()
 
 
 # ---------------------------------------------------------------------------
@@ -252,47 +238,23 @@ def save_report(report: dict,session_id: int,exam_name: str = "Esame",) -> dict[
     """
     Genera e salva Markdown e PDF su disco.
     Returns: {"md": path_md, "pdf": path_pdf}
-    
-    FIX: gestione errori completa con fallback e logging.
+
+    Nessun fallback: qualunque errore nella generazione o nel salvataggio
+    dei file si propaga esplicitamente al chiamante.
     """
-    try:
-        if REPORTS_DIR is None:
-            print("[ReportGenerator] ❌ Cartella reports non disponibile, fallback fallito", file=sys.stderr)
-            return {"md": "", "pdf": ""}
-        
-        student_id = report.get("student_id", 0)
-        exam_id = report.get("exam_id", 0)
-        base_name = f"{student_id}_{exam_id}_{session_id}"
+    student_id = report.get("student_id", 0)
+    exam_id = report.get("exam_id", 0)
+    base_name = f"{student_id}_{exam_id}_{session_id}"
 
-        md_path = REPORTS_DIR / f"{base_name}.md"
-        pdf_path = REPORTS_DIR / f"{base_name}.pdf"
+    md_path = REPORTS_DIR / f"{base_name}.md"
+    pdf_path = REPORTS_DIR / f"{base_name}.pdf"
 
-        # Genera Markdown
-        try:
-            md_content = generate_markdown(report, session_id, exam_name)
-            md_path.write_text(md_content, encoding="utf-8")
-            print(f"[ReportGenerator] ✅ Salvato Markdown: {md_path}")
-        except Exception as md_e: # pylint: disable=broad-exception-caught
-            print(f"[ReportGenerator] ⚠️ Errore salvataggio Markdown: {md_e}", file=sys.stderr)
-            print(traceback.format_exc(), file=sys.stderr)
-            md_path = None
+    md_content = generate_markdown(report, session_id, exam_name)
+    md_path.write_text(md_content, encoding="utf-8")
+    print(f"[ReportGenerator] ✅ Salvato Markdown: {md_path}")
 
-        # Genera PDF
-        try:
-            pdf_bytes = generate_pdf(report, session_id, exam_name)
-            pdf_path.write_bytes(pdf_bytes)
-            print(f"[ReportGenerator] ✅ Salvato PDF: {pdf_path}")
-        except Exception as pdf_e: # pylint: disable=broad-exception-caught
-            print(f"[ReportGenerator] ⚠️ Errore salvataggio PDF: {pdf_e}", file=sys.stderr)
-            print(traceback.format_exc(), file=sys.stderr)
-            pdf_path = None
+    pdf_bytes = generate_pdf(report, session_id, exam_name)
+    pdf_path.write_bytes(pdf_bytes)
+    print(f"[ReportGenerator] ✅ Salvato PDF: {pdf_path}")
 
-        return {
-            "md": str(md_path) if md_path else "",
-            "pdf": str(pdf_path) if pdf_path else ""
-        }
-    
-    except Exception as e: # pylint: disable=broad-exception-caught
-        print(f"[ReportGenerator] ❌ Errore critico in save_report: {e}", file=sys.stderr)
-        print(traceback.format_exc(), file=sys.stderr)
-        return {"md": "", "pdf": ""}
+    return {"md": str(md_path), "pdf": str(pdf_path)}

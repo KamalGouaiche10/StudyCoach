@@ -5,7 +5,7 @@ from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 
 Base = declarative_base()
 
-# ── FIX: path assoluto basato sulla posizione del file ─────────────────────
+# path assoluto basato sulla posizione del file ─────────────────────
 # Con un path relativo ("./data/study_coach.db") SQLite dipende dalla
 # working directory di chi avvia lo script. Quando si esegue app/main.py
 # direttamente (non con `streamlit run`) la cwd non è la root del progetto
@@ -25,6 +25,9 @@ class Student(Base):
         id: Identificativo univoco dello studente.
         username: Nome utente univoco.
         password_hash: Hash della password memorizzata in modo sicuro.
+        session_token: Token persistente per il login automatico via cookie
+            (vedi backend/session_cookie.py). None se non ha mai effettuato
+            un login "ricordami" o dopo un logout esplicito.
         created_at: Data e ora di creazione del record.
         exams: Collezione degli esami associati allo studente.
     """
@@ -32,6 +35,7 @@ class Student(Base):
     id            = Column(Integer, primary_key=True)
     username      = Column(String(50), unique=True, nullable=False)
     password_hash = Column(String(128), nullable=False)
+    session_token = Column(String(64), unique=True, nullable=True)
     created_at    = Column(DateTime(timezone=True), default=now_utc)
     exams         = relationship("Exam", back_populates="student", cascade="all, delete")
 
@@ -106,5 +110,28 @@ engine = create_engine(f"sqlite:///{_DB_DIR / 'study_coach.db'}", echo=False)
 
 def init_db():
     Base.metadata.create_all(engine)
+    _ensure_session_token_column()
+
+
+def _ensure_session_token_column():
+    """
+    Migrazione leggera per DB creati prima dell'introduzione del login
+    persistente: aggiunge la colonna session_token se mancante.
+    Nota: SQLite non permette di aggiungere un vincolo UNIQUE con ALTER
+    TABLE; la colonna aggiunta in questo modo non ha quindi un vincolo
+    UNIQUE a livello di DB (i token restano comunque generati con
+    secrets.token_urlsafe(32), quindi la probabilità di collisione è
+    trascurabile). Sui DB creati da zero il vincolo UNIQUE è presente
+    normalmente perché definito nel modello ORM.
+    """
+    from sqlalchemy import inspect, text
+
+    inspector = inspect(engine)
+    if "students" not in inspector.get_table_names():
+        return
+    columns = [c["name"] for c in inspector.get_columns("students")]
+    if "session_token" not in columns:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE students ADD COLUMN session_token VARCHAR(64)"))
 
 SessionLocal = sessionmaker(bind=engine)

@@ -10,8 +10,6 @@ import re
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Optional
-
 from agno.agent import Agent
 from agno.models.groq import Groq
 from dotenv import load_dotenv
@@ -29,7 +27,6 @@ PROMPT_PATH = Path(__file__).parent / "prompts" / f"{PROMPT_VERSION}.txt"
 DEFAULT_N_QUESTIONS = 5
 DEFAULT_N_CHUNKS = 8
 DEFAULT_MODEL = "llama-3.3-70b-versatile"
-MAX_RETRIES = 3
 RETRY_DELAY = 3
 
 
@@ -139,63 +136,6 @@ def _make_quiz_agent(model_name: str) -> Agent:
     )
 
 
-def _extract_questions_from_chunks(chunks: list[str], n_questions: int) -> QuizResult:
-    """
-    Fallback: genera domande di base a partire dai chunk quando il modello fallisce.
-    """
-    # Estrai parole chiave dai chunk
-    keywords = [
-        "probabilità", "probabilita", "evento", "statistica", "distribuzione",
-        "media", "varianza", "deviazione", "campione", "popolazione",
-        "intervallo", "confidenza", "teorema", "bayes", "condizionata",
-        "indipendenza", "correlazione", "normal", "standard", "media",
-        "mediana", "moda", "quartile", "percentile", "covarianza",
-    ]
-
-    topics = []
-    for chunk in chunks:
-        lower = chunk.lower()
-        for kw in keywords:
-            if kw in lower and kw not in topics:
-                topics.append(kw)
-                if len(topics) >= n_questions:
-                    break
-        if len(topics) >= n_questions:
-            break
-
-    if not topics:
-        topics = ["Probabilità", "Statistica Descrittiva", "Inferenza", "Distribuzioni", "Stima"]
-
-    difficulties = ["base", "intermedia", "avanzata", "intermedia", "base"]
-    questions = []
-
-    for i, topic in enumerate(topics[:n_questions]):
-        diff = difficulties[i % len(difficulties)]
-        # Crea una domanda significativa per ogni topic
-        if diff == "base":
-            text = f"Definire il concetto di {topic} e spiegare la sua importanza nell'analisi statistica."
-        elif diff == "intermedia":
-            text = f"Spiegare come si applica il concetto di {topic} in un contesto pratico, fornendo un esempio concreto con calcoli numerici."
-        else:
-            text = f"Analizzare criticamente il ruolo di {topic} nella modellazione statistica. Discutere i limiti e le possibili estensioni del concetto."
-
-        questions.append(Question(
-            id=i + 1,
-            text=text,
-            difficulty=diff,
-            topic_hint=topic.capitalize()
-        ))
-
-    return QuizResult(
-        questions=questions,
-        source_name="Materiale di studio (fallback)",
-        n_questions=len(questions),
-        prompt_version=PROMPT_VERSION,
-        exam_id=0,
-        student_id=0,
-    )
-
-
 def _is_rate_limit_error(raw: str) -> bool:
     """Verifica se la risposta contiene un errore di rate limit."""
     if not raw:
@@ -223,8 +163,10 @@ def generate_quiz(
         model_name: str = DEFAULT_MODEL,
 ) -> QuizResult:
     """
-    Genera N domande a risposta aperta sul materiale indicizzato.
-    Con retry automatico e fallback robusto.
+    Genera N domande a risposta aperta sul materiale indicizzato usando
+    esclusivamente l'agente Agno. Nessun fallback: in caso di errore o
+    risposta non valida si ritenta indefinitamente finché non si ottiene
+    un quiz corretto.
     """
     # 1. RAG
     chunks = retrieve_chunks(
@@ -243,28 +185,30 @@ def generate_quiz(
     context_text = "\n\n---\n\n".join(chunks)
     template = _load_prompt_template()
 
-    # 2. Tentativi con retry
-    last_error = None
-
-    for attempt in range(MAX_RETRIES):
+    # 2. Tentativi con retry infinito: nessun fallback, si continua a
+    #    interrogare l'agente Agno finché non produce un quiz valido.
+    #    Anche la formattazione del prompt è dentro il loop: qualunque
+    #    errore (template malformato, dati mancanti, ecc.) viene ritentato
+    #    invece di propagarsi subito al chiamante.
+    attempt = 0
+    while True:
+        attempt += 1
         try:
-            print(f"[QuizGenerator] Tentativo {attempt + 1}/{MAX_RETRIES}...")
+            print(f"[QuizGenerator] Tentativo {attempt}...")
 
-            # Prepara il prompt
             filled_prompt = template.format(
                 n_questions=n_questions,
                 source_name=source_name,
                 context_chunks=context_text,
             )
 
-            # Chiamata all'agente
             agent = _make_quiz_agent(model_name)
             run_output = agent.run(filled_prompt, stream=False)
             raw_text = run_output.get_content_as_string()
 
             # Controlla errori di rate limit
             if _is_rate_limit_error(raw_text):
-                print(f"[QuizGenerator] Rate limit rilevato, attendere {RETRY_DELAY}s...")
+                print(f"[QuizGenerator] Rate limit rilevato, attendo {RETRY_DELAY * 2}s...")
                 time.sleep(RETRY_DELAY * 2)
                 continue
 
@@ -272,13 +216,9 @@ def generate_quiz(
             try:
                 data = _parse_llm_response(raw_text)
             except ValueError as e:
-                print(f"[QuizGenerator] Parsing fallito: {e}")
-                last_error = str(e)
-                if attempt < MAX_RETRIES - 1:
-                    time.sleep(RETRY_DELAY)
-                    continue
-                # Se è l'ultimo tentativo, usa il fallback
-                return _extract_questions_from_chunks(chunks, n_questions)
+                print(f"[QuizGenerator] Parsing fallito (tentativo {attempt}): {e}. Ritento...")
+                time.sleep(RETRY_DELAY)
+                continue
 
             # Costruzione risultati
             questions = []
@@ -292,16 +232,13 @@ def generate_quiz(
                     topic_hint=q.get("topic_hint", "Generale"),
                 ))
 
-            # Se non ci sono domande valide, usa fallback
-            if not questions:
-                print("[QuizGenerator] Nessuna domanda valida generata, uso fallback")
-                return _extract_questions_from_chunks(chunks, n_questions)
-
-            # Se sono meno di n_questions, completa con fallback
             if len(questions) < n_questions:
-                print(f"[QuizGenerator] Generate solo {len(questions)} domande, completamento con fallback")
-                fallback = _extract_questions_from_chunks(chunks, n_questions - len(questions))
-                questions.extend(fallback.questions)
+                print(
+                    f"[QuizGenerator] Generate solo {len(questions)}/{n_questions} "
+                    "domande valide, ritento la generazione completa..."
+                )
+                time.sleep(RETRY_DELAY)
+                continue
 
             result = QuizResult(
                 questions=questions[:n_questions],
@@ -312,19 +249,13 @@ def generate_quiz(
                 student_id=student_id,
             )
 
-            print(f"[QuizGenerator] ✅ {result.n_questions} domande generate con successo")
+            print(f"[QuizGenerator] ✅ {result.n_questions} domande generate con successo (tentativo {attempt})")
             return result
 
         except Exception as e:
-            print(f"[QuizGenerator] Tentativo {attempt + 1} fallito: {e}")
-            last_error = str(e)
-            if attempt < MAX_RETRIES - 1:
-                time.sleep(RETRY_DELAY)
-                continue
-
-    # 3. Se tutti i tentativi falliscono, usa il fallback
-    print(f"[QuizGenerator] ⚠️ Tutti i tentativi falliti, uso fallback. Ultimo errore: {last_error}")
-    return _extract_questions_from_chunks(chunks, n_questions)
+            print(f"[QuizGenerator] Tentativo {attempt} fallito con errore: {e}. Ritento...")
+            time.sleep(RETRY_DELAY)
+            continue
 
 
 # ---------------------------------------------------------------------------

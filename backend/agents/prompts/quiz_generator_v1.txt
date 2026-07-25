@@ -31,23 +31,23 @@ ISTRUZIONI FONDAMENTALI — LEGGI CON MOLTA ATTENZIONE:
    NON usare virgole finali negli array o oggetti.
 
    Struttura ESATTA del JSON:
-   {
+   {{
      "source_name": "{source_name}",
      "questions": [
-       {
+       {{
          "id": 1,
          "text": "Testo della domanda...",
          "difficulty": "base",
          "topic_hint": "Argomento principale"
-       },
-       {
+       }},
+       {{
          "id": 2,
          "text": "Testo della seconda domanda...",
          "difficulty": "intermedia",
          "topic_hint": "Secondo argomento"
-       }
+       }}
      ]
-   }
+   }}
 
 5. **ESEMPIO DI DOMANDA BEN FORMULATA**:
    "Si consideri un esperimento casuale consistente nel lancio di due dadi equilibrati. Si calcoli la probabilità che la somma dei due risultati sia maggiore di 8, sapendo che il primo dado ha mostrato un numero pari. Si giustifichi il ragionamento."

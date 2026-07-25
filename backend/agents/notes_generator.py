@@ -34,7 +34,6 @@ PROMPT_PATH = Path(__file__).parent / "prompts" / f"{PROMPT_VERSION}.txt"
 DEFAULT_MODEL = "llama-3.3-70b-versatile"
 DEFAULT_N_CHUNKS = 10
 MIN_NOTES_LENGTH = 700
-MAX_RETRIES = 3
 RETRY_DELAY = 5
 
 # Margini PDF (in mm)
@@ -209,82 +208,32 @@ def _validate_notes(notes: str) -> tuple[bool, str]:
     return True, ""
 
 
-def _extract_concepts_from_chunks(chunks: list[str]) -> list[str]:
-    keywords = [
-        "probabilità", "probabilita", "evento", "statistica", "distribuzione",
-        "media", "varianza", "deviazione", "campione", "popolazione",
-        "intervallo", "confidenza", "teorema", "bayes", "condizionata",
-        "indipendenza", "correlazione", "normal", "standard",
-    ]
-    concepts = []
-    for chunk in chunks:
-        lower = chunk.lower()
-        for kw in keywords:
-            if kw in lower and kw not in concepts:
-                concepts.append(kw)
-                if len(concepts) >= 6:
-                    return concepts
-    return ["Probabilità", "Statistica Descrittiva", "Inferenza", "Distribuzioni", "Stima", "Correlazione"]
-
-
-def _generate_fallback_notes(chunks: list[str] = None, weak_topics: list[str] = None) -> str:
-    concepts = weak_topics if weak_topics else _extract_concepts_from_chunks(chunks or [])
-    if not concepts:
-        concepts = ["Probabilità", "Statistica Descrittiva", "Inferenza Statistica", "Distribuzioni", "Stima"]
-
-    notes = """## 1. Introduzione alla Probabilità e Statistica
-
-La probabilità e la statistica sono due discipline fondamentali per la comprensione e l'analisi dei fenomeni incerti. La probabilità fornisce il quadro teorico per quantificare l'incertezza, mentre la statistica offre gli strumenti per raccogliere, analizzare e interpretare i dati.
-
-"""
-    for i, concept in enumerate(concepts, 1):
-        notes += f"""
-### {i}. {concept.capitalize()}
-
-> **Definizione — {concept.capitalize()}:** Questo concetto rappresenta un elemento fondamentale della teoria statistica e probabilistica.
-
-**Esempio:** In un contesto applicativo, questo concetto viene utilizzato per modellare e analizzare fenomeni reali, come il lancio di una moneta, il campionamento di una popolazione o la stima di parametri incogniti.
-
-"""
-
-    notes += """
-## Riepilogo — Punti Chiave da Memorizzare
-
-1. La probabilità è una misura che quantifica l'incertezza associata al verificarsi di un evento, assumendo valori tra 0 e 1.
-
-2. La statistica descrittiva fornisce strumenti per sintetizzare e descrivere i dati attraverso misure di tendenza centrale e di dispersione.
-
-3. L'inferenza statistica permette di trarre conclusioni su una popolazione a partire da un campione.
-
-4. La probabilità condizionata, P(A|B), rappresenta la probabilità di A dato che B si è verificato.
-
-5. Il Teorema di Bayes collega le probabilità condizionate e consente di aggiornare le credenze.
-"""
-    return notes
-
-
-def _run_with_retry(agent: Agent, prompt: str, fallback_chunks: list[str] = None, weak_topics: list[str] = None) -> str:
-    for attempt in range(MAX_RETRIES):
+def _run_with_retry(agent: Agent, prompt: str) -> str:
+    """
+    Interroga l'agente Agno finché non produce appunti validi.
+    Nessun fallback: in caso di errore, rate limit o validazione fallita
+    si ritenta indefinitamente.
+    """
+    attempt = 0
+    while True:
+        attempt += 1
         try:
             output = agent.run(prompt, stream=False)
             response = output.get_content_as_string().strip()
             if _is_error_response(response):
                 wait = _parse_error_retry_time(response)
-                if wait and wait > 60:
-                    return _generate_fallback_notes(fallback_chunks, weak_topics)
+                print(f"[NotesGenerator] Errore/rate limit (tentativo {attempt}), attendo {wait or RETRY_DELAY}s...")
                 time.sleep(min(wait or RETRY_DELAY, 60))
                 continue
             is_valid, msg = _validate_notes(response)
             if is_valid:
                 return response
-            if attempt < MAX_RETRIES - 1:
-                prompt += f"\n\nNOTA: {msg}. Riscrivi in modo più completo."
-                time.sleep(RETRY_DELAY)
+            print(f"[NotesGenerator] Validazione fallita (tentativo {attempt}): {msg}. Ritento...")
+            prompt += f"\n\nNOTA: {msg}. Riscrivi in modo più completo."
+            time.sleep(RETRY_DELAY)
         except Exception as e:
-            print(f"[NotesGenerator] Tentativo {attempt+1} fallito: {e}")
-            if attempt < MAX_RETRIES - 1:
-                time.sleep(RETRY_DELAY)
-    return _generate_fallback_notes(fallback_chunks, weak_topics)
+            print(f"[NotesGenerator] Tentativo {attempt} fallito: {e}. Ritento...")
+            time.sleep(RETRY_DELAY)
 
 
 # ---------------------------------------------------------------------------
@@ -464,7 +413,7 @@ def _render_markdown(pdf: _NotesPDF, text_md: str):
             pdf.set_font("Helvetica", "", 10.5)
             pdf.set_text_color(60, 60, 60)
             pdf.set_x(LEFT_MARGIN + SUBBULLET_INDENT)
-            pdf.cell(5, LH, "◦")
+            pdf.cell(5, LH, "-")
             pdf.multi_cell(PAGE_W - SUBBULLET_INDENT - 5, LH, content)
             pdf.set_x(LEFT_MARGIN)
             pdf.set_text_color(40, 40, 40)
@@ -479,7 +428,7 @@ def _render_markdown(pdf: _NotesPDF, text_md: str):
             pdf.set_x(LEFT_MARGIN + BULLET_INDENT)
             pdf.set_font("Helvetica", "B", 12)
             pdf.set_text_color(41, 128, 185)
-            pdf.cell(6, LH, "•")
+            pdf.cell(6, LH, "·")
             pdf.set_font("Helvetica", "", 11)
             pdf.set_text_color(40, 40, 40)
             pdf.multi_cell(PAGE_W - BULLET_INDENT - 6, LH, content)
@@ -578,7 +527,7 @@ def generate_notes(
     template = _load_prompt_template()
     prompt = template.format(mode="materiale", source_name=source_name, context=context, log_summary="", weak_topics="")
     agent = _make_notes_agent(model_name)
-    notes = _run_with_retry(agent, prompt, fallback_chunks=chunks)
+    notes = _run_with_retry(agent, prompt)
     print(f"[NotesGenerator] Appunti generati | parole={len(re.findall(r'\\b\\w+\\b', notes))}")
     return notes
 
@@ -656,62 +605,44 @@ def generate_notes_pdf_from_materials(
 
         for material in materials:
             filename = getattr(material, "filename", None) or material.get("filename", "materiale di studio")
-            try:
-                chunks = _clean_chunks(retrieve_chunks_by_source(student_id, exam_id, filename, limit=12))
-                if not chunks and not has_content and global_chunks:
-                    chunks = global_chunks
-                if not chunks:
-                    continue
 
-                has_content = True
-                pdf.add_page()
-                pdf.set_font("Helvetica", "B", 16)
-                pdf.set_text_color(52, 73, 94)
-                pdf.cell(0, 10, _pdf_safe_text(f"Fonte: {filename}"), ln=True)
-                pdf.ln(2)
+            chunks = _clean_chunks(retrieve_chunks_by_source(student_id, exam_id, filename, limit=12))
+            if not chunks:
+                chunks = global_chunks
+            if not chunks:
+                continue
 
-                context = "\n\n---\n\n".join(chunks)
-                template = _load_prompt_template()
-                prompt = template.format(mode="materiale", source_name=filename, context=context, log_summary="", weak_topics="")
-                agent = _make_notes_agent(model_name)
-                notes_md = _run_with_retry(agent, prompt, fallback_chunks=chunks)
+            has_content = True
+            pdf.add_page()
+            pdf.set_font("Helvetica", "B", 16)
+            pdf.set_text_color(52, 73, 94)
+            pdf.cell(0, 10, _pdf_safe_text(f"Fonte: {filename}"), ln=True)
+            pdf.ln(2)
 
-                is_valid, _ = _validate_notes(notes_md)
-                if not is_valid:
-                    notes_md = _generate_fallback_notes(chunks)
+            context = "\n\n---\n\n".join(chunks)
+            template = _load_prompt_template()
+            prompt = template.format(mode="materiale", source_name=filename, context=context, log_summary="", weak_topics="")
+            agent = _make_notes_agent(model_name)
+            notes_md = _run_with_retry(agent, prompt)
 
-                _render_markdown(pdf, notes_md)
-
-            except Exception as e:
-                print(f"[NotesGenerator] Errore su {filename}: {e}")
-                pdf.add_page()
-                pdf.set_font("Helvetica", "B", 14)
-                pdf.set_text_color(192, 57, 43)
-                pdf.cell(0, 10, _pdf_safe_text(f"Errore: {filename}"), ln=True)
-                pdf.ln(2)
-                pdf.set_font("Helvetica", "", 11)
-                pdf.set_text_color(40, 40, 40)
-                pdf.multi_cell(0, 6, _pdf_safe_text(f"Impossibile generare gli appunti per questo materiale. {e}"))
+            _render_markdown(pdf, notes_md)
 
         if not has_content:
+            if not global_chunks:
+                raise ValueError(
+                    f"Nessun contenuto indicizzato trovato per student_id={student_id}, exam_id={exam_id}."
+                )
             pdf.add_page()
-            if global_chunks:
-                try:
-                    pdf.set_font("Helvetica", "B", 16)
-                    pdf.set_text_color(52, 73, 94)
-                    pdf.cell(0, 10, "Sintesi Generale dell'Esame", ln=True)
-                    pdf.ln(2)
-                    context = "\n\n---\n\n".join(global_chunks)
-                    template = _load_prompt_template()
-                    prompt = template.format(mode="materiale", source_name="Sintesi Globale", context=context, log_summary="", weak_topics="")
-                    agent = _make_notes_agent(model_name)
-                    notes_md = _run_with_retry(agent, prompt, fallback_chunks=global_chunks)
-                    _render_markdown(pdf, notes_md)
-                except Exception as e:
-                    pdf.multi_cell(0, 6, f"Errore: {e}")
-            else:
-                notes_md = _generate_fallback_notes(global_chunks)
-                _render_markdown(pdf, notes_md)
+            pdf.set_font("Helvetica", "B", 16)
+            pdf.set_text_color(52, 73, 94)
+            pdf.cell(0, 10, "Sintesi Generale dell'Esame", ln=True)
+            pdf.ln(2)
+            context = "\n\n---\n\n".join(global_chunks)
+            template = _load_prompt_template()
+            prompt = template.format(mode="materiale", source_name="Sintesi Globale", context=context, log_summary="", weak_topics="")
+            agent = _make_notes_agent(model_name)
+            notes_md = _run_with_retry(agent, prompt)
+            _render_markdown(pdf, notes_md)
 
     out = pdf.output()
     if isinstance(out, (bytes, bytearray)):
@@ -737,14 +668,10 @@ def generate_notes_from_log(
     weak_str = ", ".join(weak_topics) if weak_topics else "nessuna lacuna rilevata"
 
     rag_context = ""
-    rag_chunks = []
     if enrich_with_rag and student_id and exam_id and weak_topics:
         query = " ".join(weak_topics[:3])
-        try:
-            rag_chunks = _clean_chunks(retrieve_chunks(query, student_id, exam_id, n_results=6))
-            rag_context = "\n\n---\n\n".join(rag_chunks)
-        except Exception as e:
-            print(f"[NotesGenerator] RAG fallito: {e}")
+        rag_chunks = _clean_chunks(retrieve_chunks(query, student_id, exam_id, n_results=6))
+        rag_context = "\n\n---\n\n".join(rag_chunks)
 
     template = _load_prompt_template()
     prompt = template.format(
@@ -756,6 +683,6 @@ def generate_notes_from_log(
     )
 
     agent = _make_notes_agent(model_name)
-    notes = _run_with_retry(agent, prompt, fallback_chunks=rag_chunks, weak_topics=weak_topics)
+    notes = _run_with_retry(agent, prompt)
     print(f"[NotesGenerator] Post-sessione | parole={len(re.findall(r'\\b\\w+\\b', notes))}")
     return notes

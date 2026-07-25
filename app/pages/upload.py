@@ -6,15 +6,14 @@ import logging
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable
-
 import streamlit as st
 from sqlalchemy.exc import SQLAlchemyError
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from backend.agents.ingestor import delete_exam_collection, ingest_pdf # pylint: disable=wrong-import-position
+from backend.agents.ingestor import delete_exam_collection # pylint: disable=wrong-import-position
 from backend.db.models import Exam, Material, SessionLocal, Session as DbSession # pylint: disable=wrong-import-position
+from backend.session_cookie import invalidate_token, render_clear_cookie # pylint: disable=wrong-import-position
 
 logger = logging.getLogger(__name__)
 
@@ -162,7 +161,7 @@ def _avg_score(exam_id: int) -> float | None:
 
 def _close_orphan_sessions(exam_id: int) -> int:
     """
-    FIX — Sessioni 'In corso': chiude tutte le sessioni senza ended_at
+    Sessioni 'In corso': chiude tutte le sessioni senza ended_at
     per questo esame prima di avviarne una nuova.
     Le sessioni orfane si creano quando l'utente chiude il browser o
     naviga via senza completare la sessione.
@@ -206,6 +205,11 @@ def _navbar():
             st.rerun()
     with col3:
         if st.button("🚪 Esci", use_container_width=True):
+            # Logout esplicito: invalida il token lato DB e cancella il
+            # cookie lato browser, così il login persistente termina
+            # davvero solo qui, e non per un semplice refresh/disconnessione.
+            invalidate_token(st.session_state.get("student_id"))
+            render_clear_cookie()
             for k in list(st.session_state.keys()):
                 del st.session_state[k]
             st.rerun()

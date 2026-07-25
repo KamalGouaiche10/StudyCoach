@@ -172,7 +172,7 @@ def _delete_session(session_id: int):
 
 def _close_session(session_id: int):
     """
-    FIX — Chiude manualmente una sessione orfana impostando ended_at=now.
+      — Chiude manualmente una sessione orfana impostando ended_at=now.
     Usato dal bottone 'Segna come conclusa' nella history per le sessioni
     che appaiono ancora 'In corso' perché ended_at è NULL.
     """
@@ -191,7 +191,7 @@ def _close_session(session_id: int):
 
 def _is_orphan(sess: DbSession) -> bool:
     """
-    FIX — Determina se una sessione è orfana (avviata ma mai completata).
+      — Determina se una sessione è orfana (avviata ma mai completata).
     Una sessione è orfana se:
       - ended_at è NULL (non è mai stata chiusa correttamente)
     Non usiamo una soglia temporale: se ended_at è NULL la sessione
@@ -432,7 +432,7 @@ def render():
     for sess in sessions:
         score     = sess.score_total
         has_score = score is not None
-        orphan    = _is_orphan(sess)           # FIX: usa ended_at, non score
+        orphan    = _is_orphan(sess)           #  : usa ended_at, non score
         duration  = _format_duration(sess.started_at, sess.ended_at)
         date_str  = sess.started_at.strftime("%d/%m/%Y %H:%M") if sess.started_at else "—"
 
@@ -442,7 +442,7 @@ def render():
             score_color   = _score_color(score)
             border_color  = score_color
         elif orphan:
-            # FIX: sessione orfana — non completata, nessun voto
+            #  : sessione orfana — non completata, nessun voto
             verdict_icon  = "⏳"
             score_str     = "Non completata"
             score_color   = "#6b7280"
@@ -481,7 +481,7 @@ def render():
                 with st.expander("📜 Dettaglio Q&A", expanded=False):
                     _render_session_detail(sess)
             elif orphan and not sess.qa_log:
-                # FIX: mostra il messaggio solo se veramente orfana E senza Q&A
+                #  : mostra il messaggio solo se veramente orfana E senza Q&A
                 st.markdown(
                     "<p style='color:#6b7280; font-size:0.82rem; margin:0.4rem 0;'>"
                     "Sessione non completata — nessun Q&A registrato.</p>",
@@ -519,7 +519,7 @@ def render():
                     st.rerun()
 
         with col_close:
-            # FIX: bottone per chiudere manualmente sessioni orfane
+            #  : bottone per chiudere manualmente sessioni orfane
             # che appaiono "In corso" a causa di ended_at=NULL.
             # Non elimina la sessione, imposta solo ended_at=now.
             if orphan:
@@ -530,7 +530,7 @@ def render():
                     st.rerun()
 
         with col_del:
-            # FIX: il bottone Elimina era condizionato a ended_at is None,
+            #  : il bottone Elimina era condizionato a ended_at is None,
             # ma ora usiamo orphan (stessa cosa) per coerenza e chiarezza.
             # Appare solo per sessioni non completate.
             if orphan:
