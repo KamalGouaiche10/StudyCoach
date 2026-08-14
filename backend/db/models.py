@@ -5,13 +5,6 @@ from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 
 Base = declarative_base()
 
-# path assoluto basato sulla posizione del file ─────────────────────
-# Con un path relativo ("./data/study_coach.db") SQLite dipende dalla
-# working directory di chi avvia lo script. Quando si esegue app/main.py
-# direttamente (non con `streamlit run`) la cwd non è la root del progetto
-# e la cartella data/ non viene trovata → OperationalError.
-# Usando Path(__file__) il path è sempre relativo al file models.py,
-# indipendentemente da dove viene lanciato il processo.
 _DB_DIR = Path(__file__).parent.parent.parent / "data"
 _DB_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -19,18 +12,6 @@ def now_utc():
     return datetime.now(timezone.utc)
 
 class Student(Base):
-    """Rappresenta uno studente registrato nel sistema Study Coach.
-
-    Attributi:
-        id: Identificativo univoco dello studente.
-        username: Nome utente univoco.
-        password_hash: Hash della password memorizzata in modo sicuro.
-        session_token: Token persistente per il login automatico via cookie
-            (vedi backend/session_cookie.py). None se non ha mai effettuato
-            un login "ricordami" o dopo un logout esplicito.
-        created_at: Data e ora di creazione del record.
-        exams: Collezione degli esami associati allo studente.
-    """
     __tablename__ = "students"
     id            = Column(Integer, primary_key=True)
     username      = Column(String(50), unique=True, nullable=False)
@@ -40,17 +21,6 @@ class Student(Base):
     exams         = relationship("Exam", back_populates="student", cascade="all, delete")
 
 class Exam(Base):
-    """Rappresenta un esame associato a uno studente.
-
-    Attributi:
-        id: Identificativo univoco dell'esame.
-        student_id: Chiave esterna verso lo studente proprietario.
-        name: Nome dell'esame.
-        created_at: Data e ora di creazione del record.
-        student: Riferimento allo studente associato.
-        sessions: Collezione delle sessioni di studio legate all'esame.
-        materials: Collezione dei materiali (PDF) caricati per l'esame.
-    """
     __tablename__ = "exams"
     id         = Column(Integer, primary_key=True)
     student_id = Column(Integer, ForeignKey("students.id"), nullable=False)
@@ -61,18 +31,6 @@ class Exam(Base):
     materials  = relationship("Material", back_populates="exam", cascade="all, delete")
 
 class Material(Base):
-    """Rappresenta un materiale (PDF) caricato per uno studio.
-
-    Attributi:
-        id: Identificativo univoco del materiale.
-        exam_id: Chiave esterna verso l'esame associato.
-        filename: Nome del file originale.
-        stored_path: Percorso del file salvato nel filesystem.
-        chunks_count: Numero di chunk indicizzati.
-        pages_count: Numero di pagine nel PDF.
-        uploaded_at: Data e ora di caricamento.
-        exam: Riferimento all'esame associato.
-    """
     __tablename__ = "materials"
     id           = Column(Integer, primary_key=True)
     exam_id      = Column(Integer, ForeignKey("exams.id"), nullable=False)
@@ -84,18 +42,6 @@ class Material(Base):
     exam         = relationship("Exam", back_populates="materials")
 
 class Session(Base):
-    """Rappresenta una sessione di studio o interrogazione per un esame.
-
-    Attributi:
-        id: Identificativo univoco della sessione.
-        exam_id: Chiave esterna verso l'esame associato.
-        started_at: Data e ora di inizio sessione.
-        ended_at: Data e ora di fine sessione, se presente.
-        score_total: Punteggio complessivo ottenuto nella sessione.
-        qa_log: Log JSON serializzato delle domande e risposte.
-        report_path: Percorso del report generato per la sessione.
-        exam: Riferimento all'esame associato.
-    """
     __tablename__ = "sessions"
     id          = Column(Integer, primary_key=True)
     exam_id     = Column(Integer, ForeignKey("exams.id"), nullable=False)
@@ -114,16 +60,6 @@ def init_db():
 
 
 def _ensure_session_token_column():
-    """
-    Migrazione leggera per DB creati prima dell'introduzione del login
-    persistente: aggiunge la colonna session_token se mancante.
-    Nota: SQLite non permette di aggiungere un vincolo UNIQUE con ALTER
-    TABLE; la colonna aggiunta in questo modo non ha quindi un vincolo
-    UNIQUE a livello di DB (i token restano comunque generati con
-    secrets.token_urlsafe(32), quindi la probabilità di collisione è
-    trascurabile). Sui DB creati da zero il vincolo UNIQUE è presente
-    normalmente perché definito nel modello ORM.
-    """
     from sqlalchemy import inspect, text
 
     inspector = inspect(engine)

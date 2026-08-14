@@ -1,19 +1,3 @@
-"""
-backend/api/sessions.py — Router sessioni di studio
-
-Flusso completo:
-  1. POST /sessions                         → apre sessione (crea DbSession)
-  2. POST /sessions/{id}/quiz               → genera quiz (QuizResult)
-  3. POST /sessions/{id}/tutor/start        → inizia loop socratico per una domanda
-  4. POST /sessions/{id}/tutor/answer1      → prima risposta → domanda guida
-  5. POST /sessions/{id}/tutor/answer2      → seconda risposta → valutazione
-  6. POST /sessions/{id}/tutor/contest      → (opzionale) contestazione
-  7. POST /sessions/{id}/tutor/close        → chiude domanda, aggiorna AdaptiveEngine
-  8. POST /sessions/{id}/next-question      → prossima domanda (AdaptiveEngine)
-  9. POST /sessions/{id}/close              → chiude sessione, genera report
-  10. GET /sessions/{id}                    → dettaglio sessione
-  11. GET /sessions?exam_id=N               → lista sessioni per esame
-"""
 
 import json
 from datetime import datetime, timezone
@@ -54,7 +38,7 @@ router = APIRouter(prefix="/sessions", tags=["sessions"])
 
 # ---------------------------------------------------------------------------
 # In-memory store per tutor e adaptive engine attivi
-# (in produzione usare Redis o un servizio esterno con TTL)
+
 # ---------------------------------------------------------------------------
 
 _active_tutors:  dict[str, SocraticTutor]  = {}   # key: f"{session_id}_{question_id}"
@@ -337,12 +321,6 @@ def tutor_contest(session_id: int, payload: ContestRequest) -> ContestResponse:
     summary="Chiude la domanda corrente e aggiorna l'engine adattivo",
 )
 def tutor_close(session_id: int, payload: CloseQuestionRequest) -> CloseQuestionResponse:
-    """
-    Chiude il loop socratico per la domanda corrente:
-    1. Chiama tutor.close() → ottiene QuestionAttempt definitivo
-    2. Aggiorna AdaptiveEngine con score e topic
-    3. Appende il tentativo al qa_log nella DbSession
-    """
     key = f"{session_id}_{payload.question_id}"
     tutor = _active_tutors.get(key)
     if not tutor:
@@ -411,10 +389,6 @@ def _append_attempt_to_log(session_id: int, attempt_dict: dict) -> None:
     summary="Ottieni la prossima domanda suggerita dall'AdaptiveEngine",
 )
 def next_question(session_id: int, payload: NextQuestionRequest) -> NextQuestionResponse:
-    """
-    L'AdaptiveEngine analizza i topic deboli e sceglie la domanda successiva
-    tra quelle rimanenti, prioritizzando gli argomenti carenti.
-    """
     engine = _active_engines.get(session_id)
     if not engine:
         raise HTTPException(
@@ -449,12 +423,6 @@ def next_question(session_id: int, payload: NextQuestionRequest) -> NextQuestion
     summary="Chiude la sessione e genera il report finale",
 )
 def close_session(session_id: int, payload: SessionCloseRequest) -> SessionReportResponse:
-    """
-    1. Genera il report da AdaptiveEngine
-    2. Salva Markdown e PDF su disco
-    3. Aggiorna DbSession (ended_at, score_total, report_path)
-    4. Pulisce l'engine dall'in-memory store
-    """
     engine = _active_engines.get(session_id)
     if not engine:
         raise HTTPException(

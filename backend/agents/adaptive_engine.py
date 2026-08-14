@@ -1,12 +1,3 @@
-"""
-Adaptive Engine — Study Coach
-===============================
-Responsabilità: analizzare i risultati progressivi di una sessione e
-adattare l'ordine delle domande successive concentrandosi sui topic
-in cui lo studente mostra maggiori lacune.
-
-Non fa chiamate LLM — è logica Python pura, veloce e testabile.
-"""
 
 import json
 from dataclasses import dataclass, field, asdict
@@ -68,29 +59,13 @@ class SessionStats:
 # ---------------------------------------------------------------------------
 
 class AdaptiveEngine:
-    """
-    Gestisce l'adattamento dinamico della sessione di studio.
 
-    Utilizzo tipico:
-        engine = AdaptiveEngine(student_id=1, exam_id=3)
-        engine.record_answer(question_id=1, topic="attention", score=4)
-        next_q = engine.pick_next_question(remaining_questions)
-        report = engine.generate_session_report()
-    """
 
     def __init__(self, student_id: int, exam_id: int):
         self.stats = SessionStats(student_id=student_id, exam_id=exam_id)
 
     def record_answer(self, question_id: int, topic: str, score: int) -> None:
-        """
-        Registra il risultato di una domanda completata.
-        Da chiamare dopo ogni close() del SocraticTutor.
 
-        Args:
-            question_id: ID della domanda appena completata
-            topic:       topic_hint dalla Question (es. "Attention mechanism")
-            score:       voto finale 0-10 (dopo eventuale contestazione)
-        """
         score = max(0, min(10, score))  # clamp difensivo
 
         if topic not in self.stats.topic_stats:
@@ -106,17 +81,7 @@ class AdaptiveEngine:
         )
 
     def pick_next_question(self, remaining: list[dict]) -> dict | None:
-        """
-        Sceglie la prossima domanda dalla lista dei rimanenti.
-        Priorità: domande su topic deboli → domande su topic non ancora visti.
 
-        Args:
-            remaining: lista di dict Question non ancora risposte
-                       (devono avere 'id' e 'topic_hint')
-
-        Returns:
-            La domanda scelta, o None se la lista è vuota.
-        """
         if not remaining:
             return None
 
@@ -147,13 +112,7 @@ class AdaptiveEngine:
         return remaining[0]
 
     def generate_session_report(self) -> dict:
-        """
-        Genera il report finale della sessione con performance per topic,
-        punti di forza, aree da rivedere e score complessivo.
 
-        Returns:
-            dict serializzabile — salvato nel qa_log e usato per il report MD/PDF
-        """
         stats = self.stats
 
         topic_breakdown = []

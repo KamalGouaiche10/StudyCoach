@@ -1,10 +1,6 @@
 """
 backend/models/schemas.py — Schemi Pydantic per l'API Study Coach
 
-Separazione netta tra:
-  - Request  : dati in entrata dalla chiamata API
-  - Response : dati restituiti al client
-  - Internal : strutture usate internamente tra agenti
 """
 
 from __future__ import annotations

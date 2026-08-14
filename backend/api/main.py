@@ -1,13 +1,4 @@
-"""
-backend/api/main.py — Entry point FastAPI per Study Coach
 
-Avvio:
-    uvicorn backend.api.main:app --reload --port 8000
-
-Docs interattive:
-    http://localhost:8000/docs   (Swagger UI)
-    http://localhost:8000/redoc  (ReDoc)
-"""
 
 from contextlib import asynccontextmanager
 from fastapi import FastAPI

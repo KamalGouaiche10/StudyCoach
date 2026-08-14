@@ -1,8 +1,3 @@
-"""
-Notes Generator Agent — Study Coach
-=====================================
-Genera appunti professionali in PDF con layout pulito e senza sovrapposizioni.
-"""
 
 from __future__ import annotations
 

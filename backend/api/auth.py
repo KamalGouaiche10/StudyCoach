@@ -1,7 +1,3 @@
-"""
-backend/api/auth.py — Router autenticazione
-Endpoint: POST /auth/register, POST /auth/login, POST /auth/logout
-"""
 
 import hashlib
 
@@ -113,9 +109,4 @@ def login(payload: LoginRequest) -> AuthResponse:
     summary="Logout (stateless — nessuna azione server)",
 )
 def logout() -> dict:
-    """
-    Con autenticazione stateless (session_state Streamlit o token lato client),
-    il logout avviene direttamente nel client. Questo endpoint è un placeholder
-    utile se si implementa una blocklist di token in futuro.
-    """
     return {"message": "Logout effettuato. Pulisci il token lato client."}

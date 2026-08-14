@@ -1,9 +1,3 @@
-"""
-Quiz Generator Agent — Study Coach
-=====================================
-Usa Agno + Groq per generare N domande a risposta aperta.
-Prompt versionato: backend/agents/prompts/quiz_generator_v1.txt
-"""
 
 import json
 import re

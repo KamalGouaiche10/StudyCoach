@@ -1,11 +1,3 @@
-"""
-backend/api/exams.py — Router gestione esami e upload PDF
-Endpoint:
-  GET    /exams                     → lista esami dello studente
-  POST   /exams                     → crea nuovo esame
-  DELETE /exams/{exam_id}           → elimina esame + collection ChromaDB
-  POST   /exams/{exam_id}/ingest    → upload e indicizzazione PDF
-"""
 
 from pathlib import Path
 from sqlalchemy.exc import SQLAlchemyError

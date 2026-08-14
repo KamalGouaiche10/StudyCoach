@@ -13,25 +13,25 @@ client = chromadb.PersistentClient(path=CHROMA_PATH)
 
 _model: SentenceTransformer | None = None
 
-
+"""
+Carica (una sola volta) il modello di embedding locale.
+Nessun fallback: se sentence-transformers non è installato o il modello
+non può essere caricato, l'eccezione si propaga esplicitamente.
+"""
 def _get_sentence_transformer() -> SentenceTransformer:
-    """
-    Carica (una sola volta) il modello di embedding locale.
-    Nessun fallback: se sentence-transformers non è installato o il modello
-    non può essere caricato, l'eccezione si propaga esplicitamente.
-    """
+
     global _model
     if _model is None:
         _model = SentenceTransformer("all-MiniLM-L6-v2")
     return _model
 
-
-class LocalEmbeddingFunction(EmbeddingFunction):
     """
     Embedding locale con sentence-transformers.
     Nessuna API key richiesta, funziona offline.
     Modello: all-MiniLM-L6-v2 (384 dimensioni, veloce e preciso)
     """
+class LocalEmbeddingFunction(EmbeddingFunction):
+
     def __call__(self, texts: Documents) -> Embeddings:
         model = _get_sentence_transformer()
         embeddings = model.encode(list(texts), convert_to_numpy=True)

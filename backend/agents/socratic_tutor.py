@@ -28,6 +28,8 @@ PROMPTS_DIR = Path(__file__).parent / "prompts"
 PROMPT_GUIDE = "socratic_tutor_guide_v1"
 PROMPT_EVAL = "socratic_tutor_eval_v1"
 PROMPT_CONTEST = "socratic_tutor_contest_v1"
+PROMPT_DOUBT_OPEN = "socratic_tutor_doubt_open_v1"
+PROMPT_DOUBT_EVAL = "socratic_tutor_doubt_eval_v1"
 
 DEFAULT_MODEL = "llama-3.3-70b-versatile"
 DEFAULT_N_CHUNKS = 5
@@ -112,6 +114,28 @@ class ContestationResult:
     contestation_assessment: str
     final_motivation: str
     response_to_student: str
+
+
+class DoubtState(Enum):
+    WAITING_ANSWER = auto()
+    ANSWERED = auto()
+
+
+@dataclass
+class DoubtEvaluationResult:
+    correct_points: list[str]
+    missing_points: list[str]
+    correct_answer: str
+
+
+@dataclass
+class DoubtAttempt:
+    doubt_text: str
+    guiding_question: str = ""
+    topic_hint: str = ""
+    student_answer: str = ""
+    evaluation: DoubtEvaluationResult | None = None
+    state: DoubtState = DoubtState.WAITING_ANSWER
 
 
 @dataclass
@@ -299,6 +323,19 @@ def _contest_agent(model_name: str) -> Agent:
     )
 
 
+def _doubt_agent(model_name: str) -> Agent:
+    return Agent(
+        name="DoubtTutorAgent",
+        model=Groq(id=model_name),
+        description=(
+            "Sei un tutor socratico universitario. Aiuti lo studente a chiarire "
+            "un proprio dubbio guidandolo con domande mirate, senza mai rivelare "
+            "subito la risposta. Rispondi SOLO con JSON valido, senza markdown."
+        ),
+        markdown=False,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Step LLM con retry e gestione rate limit
 # ---------------------------------------------------------------------------
@@ -452,6 +489,94 @@ def _re_evaluate_after_contestation(
 
 
 # ---------------------------------------------------------------------------
+# Step LLM — flusso "dubbio libero" (chatbot avviato dallo studente)
+# ---------------------------------------------------------------------------
+
+def _generate_opening_question(
+    doubt_text: str,
+    context_chunks: list[str],
+    model_name: str,
+) -> dict:
+    template = _load_prompt(PROMPT_DOUBT_OPEN)
+    prompt = template.format(
+        doubt_text=doubt_text,
+        context_chunks="\n\n---\n\n".join(context_chunks),
+    )
+    agent = _doubt_agent(model_name)
+
+    attempt_num = 0
+    while True:
+        attempt_num += 1
+        try:
+            output = agent.run(prompt, stream=False)
+            raw = output.get_content_as_string()
+
+            if _is_rate_limit_error(raw):
+                wait = _parse_retry_after(raw)
+                if wait and wait > 0:
+                    print(f"[DoubtTutorAgent] Rate limit, attendo {wait}s...")
+                    time.sleep(min(wait, 60))
+                else:
+                    time.sleep(RETRY_DELAY)
+                continue
+
+            data = _parse_json(raw)
+            if "guiding_question" not in data:
+                raise ValueError(f"Risposta mancante di 'guiding_question': {data}")
+            return data
+
+        except Exception as e:
+            print(f"[DoubtTutorAgent] Tentativo {attempt_num} fallito: {e}. Ritento...")
+            time.sleep(RETRY_DELAY)
+            continue
+
+
+def _evaluate_doubt(
+    attempt: "DoubtAttempt",
+    context_chunks: list[str],
+    model_name: str,
+) -> DoubtEvaluationResult:
+    template = _load_prompt(PROMPT_DOUBT_EVAL)
+    prompt = template.format(
+        doubt_text=attempt.doubt_text,
+        guiding_question=attempt.guiding_question,
+        student_answer=attempt.student_answer,
+        context_chunks="\n\n---\n\n".join(context_chunks),
+    )
+    agent = _doubt_agent(model_name)
+
+    attempt_num = 0
+    while True:
+        attempt_num += 1
+        try:
+            output = agent.run(prompt, stream=False)
+            raw = output.get_content_as_string()
+
+            if _is_rate_limit_error(raw):
+                wait = _parse_retry_after(raw)
+                if wait and wait > 0:
+                    print(f"[DoubtTutorAgent] Rate limit, attendo {wait}s...")
+                    time.sleep(min(wait, 60))
+                else:
+                    time.sleep(RETRY_DELAY)
+                continue
+
+            data = _parse_json(raw)
+            if "correct_answer" not in data:
+                raise ValueError(f"Risposta mancante di 'correct_answer': {data}")
+            return DoubtEvaluationResult(
+                correct_points=data.get("correct_points", []),
+                missing_points=data.get("missing_points", []),
+                correct_answer=data["correct_answer"],
+            )
+
+        except Exception as e:
+            print(f"[DoubtTutorAgent] Tentativo {attempt_num} fallito: {e}. Ritento...")
+            time.sleep(RETRY_DELAY)
+            continue
+
+
+# ---------------------------------------------------------------------------
 # SocraticTutor — classe principale
 # ---------------------------------------------------------------------------
 
@@ -572,6 +697,91 @@ class SocraticTutor:
         return json.dumps(self.to_dict(), ensure_ascii=False, indent=2)
 
     def _assert_state(self, expected: TurnState) -> None:
+        if self.attempt is None:
+            raise RuntimeError("Tutor non inizializzato. Chiama start() prima.")
+        if self.attempt.state != expected:
+            raise RuntimeError(
+                f"Stato '{self.attempt.state.name}' non valido. "
+                f"Atteso: '{expected.name}'."
+            )
+
+
+# ---------------------------------------------------------------------------
+# DoubtTutor — chatbot per dubbi liberi dello studente
+# ---------------------------------------------------------------------------
+
+class DoubtTutor:
+    """
+    Gestisce il loop socratico avviato da un dubbio libero dello studente:
+    lo studente scrive un dubbio -> il tutor risponde con una domanda guida
+    socratica (senza svelare la risposta) -> lo studente risponde -> il tutor
+    mostra dove ha sbagliato e fornisce la risposta corretta e migliorata,
+    basandosi sui chunk RAG del materiale caricato per l'esame.
+    """
+
+    def __init__(
+        self,
+        student_id: int,
+        exam_id: int,
+        model_name: str = DEFAULT_MODEL,
+        n_chunks: int = DEFAULT_N_CHUNKS,
+    ):
+        self.student_id = student_id
+        self.exam_id = exam_id
+        self.model_name = model_name
+        self.n_chunks = n_chunks
+        self.attempt: DoubtAttempt | None = None
+        self._context_cache: list[str] = []
+
+    def start(self, doubt_text: str) -> dict:
+        doubt_text = doubt_text.strip()
+        self._context_cache = retrieve_chunks(
+            query=doubt_text,
+            student_id=self.student_id,
+            exam_id=self.exam_id,
+            n_results=self.n_chunks,
+        )
+        if not self._context_cache:
+            raise ValueError(
+                "Non ho trovato materiale caricato pertinente a questo dubbio. "
+                "Carica un PDF sull'argomento o riformula la domanda."
+            )
+
+        data = _generate_opening_question(doubt_text, self._context_cache, self.model_name)
+        self.attempt = DoubtAttempt(
+            doubt_text=doubt_text,
+            guiding_question=data["guiding_question"],
+            topic_hint=data.get("topic_hint", ""),
+        )
+        return {
+            "guiding_question": self.attempt.guiding_question,
+            "topic_hint": self.attempt.topic_hint,
+        }
+
+    def submit_answer(self, answer: str) -> dict:
+        self._assert_state(DoubtState.WAITING_ANSWER)
+        attempt = cast(DoubtAttempt, self.attempt)
+        attempt.student_answer = answer.strip()
+
+        eval_result = _evaluate_doubt(attempt, self._context_cache, self.model_name)
+        attempt.evaluation = eval_result
+        attempt.state = DoubtState.ANSWERED
+
+        print(f"[DoubtTutorAgent] valutato dubbio '{attempt.topic_hint}'")
+        return {
+            "correct_points": eval_result.correct_points,
+            "missing_points": eval_result.missing_points,
+            "correct_answer": eval_result.correct_answer,
+        }
+
+    def to_dict(self) -> dict:
+        if self.attempt is None:
+            return {}
+        d = asdict(self.attempt)
+        d["state"] = self.attempt.state.name
+        return d
+
+    def _assert_state(self, expected: DoubtState) -> None:
         if self.attempt is None:
             raise RuntimeError("Tutor non inizializzato. Chiama start() prima.")
         if self.attempt.state != expected:

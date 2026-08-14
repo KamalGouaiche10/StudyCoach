@@ -141,6 +141,9 @@ defaults = {
     "tutor":         None,
     "current_q_idx": 0,
     "tutor_state":   "idle",  # idle | answer1 | answer2 | evaluated | contested | closed
+    "chat_messages": [],      # storico chatbot dubbi: [{"role", "content"}, ...]
+    "chat_tutor":    None,    # DoubtTutor attivo per il dubbio corrente
+    "chat_stage":    "idle",  # idle | waiting_answer
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -180,6 +183,9 @@ elif page == "upload":
     render()
 elif page == "session":
     from pages.session import render
+    render()
+elif page == "chat":
+    from pages.chat import render
     render()
 elif page == "history":
     from pages.history import render

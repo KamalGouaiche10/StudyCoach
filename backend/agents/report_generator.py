@@ -1,12 +1,3 @@
-"""
-Report Generator — Study Coach
-================================
-Responsabilità: generare il report finale di una sessione in formato
-Markdown e PDF a partire dal report dict prodotto dall'Adaptive Engine.
-Il report finale include:
-    - reports/{student_id}_{exam_id}_{session_id}.md
-    - reports/{student_id}_{exam_id}_{session_id}.pdf
-"""
 
 from __future__ import annotations
 

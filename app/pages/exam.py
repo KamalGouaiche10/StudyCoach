@@ -56,7 +56,7 @@ def render():
     finally:
         db.close()
 
-    col_start, col_sources, col_notes, col_history = st.columns([1.2, 1.6, 1.6, 1])
+    col_start, col_sources, col_notes, col_chat, col_history = st.columns([1.2, 1.6, 1.6, 1.2, 1])
 
     with col_start:
         if st.button("▶ Avvia sessione", use_container_width=True, key=f"exam_start_{exam['id']}"):
@@ -175,6 +175,14 @@ def render():
                 use_container_width=True,
                 key=f"download_notes_{exam['id']}",
             )
+
+    with col_chat:
+        if st.button("💬 Chiedi al tutor", use_container_width=True, key=f"exam_chat_{exam['id']}"):
+            st.session_state.chat_messages = []
+            st.session_state.chat_tutor = None
+            st.session_state.chat_stage = "idle"
+            st.session_state.current_page = "chat"
+            st.rerun()
 
     with col_history:
         if st.button("📋 Storico", use_container_width=True, key=f"exam_history_{exam['id']}"):

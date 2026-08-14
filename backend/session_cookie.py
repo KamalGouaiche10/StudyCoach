@@ -1,28 +1,5 @@
 """
 backend/session_cookie.py — Login persistente tramite cookie di sessione
-==========================================================================
-Nessuna libreria esterna: il cookie viene scritto e letto lato client con
-piccoli snippet JS iniettati tramite st.components.v1.html (già incluso in
-Streamlit). Il valore del cookie è un token casuale associato allo studente
-e verificato lato server contro backend.db.models.Student.session_token.
-
-Flusso:
-  1. Al login/registrazione: get_or_create_token() genera (o riusa) un
-     token persistente per lo studente, salvato nel DB. render_set_cookie()
-     lo scrive nel browser con una scadenza lunghissima (~10 anni, la cosa
-     più vicina a "nessuna scadenza" che un cookie possa avere).
-  2. Ad ogni caricamento pagina, se lo studente NON risulta autenticato in
-     session_state (es. dopo un refresh, riavvio del browser o
-     disconnessione del websocket che ha azzerato session_state), main.py:
-       - se l'URL contiene già ?token=..., verifica il token e logga
-         automaticamente lo studente;
-       - altrimenti chiama render_cookie_autologin_probe(), che legge il
-         cookie lato JS e — se presente — ricarica la pagina aggiungendo
-         il token come query param, permettendo così al backend Python
-         (che non può leggere i cookie direttamente) di recuperarlo.
-  3. Al logout esplicito: invalidate_token() cancella il token nel DB e
-     render_clear_cookie() rimuove il cookie dal browser. Da quel momento
-     nessun dispositivo con quel vecchio cookie potrà più auto-loggarsi.
 """
 
 import secrets
@@ -39,9 +16,9 @@ COOKIE_MAX_AGE = 10 * 365 * 24 * 60 * 60  # ~10 anni: emula "nessuna scadenza"
 # ---------------------------------------------------------------------------
 # Gestione token lato DB
 # ---------------------------------------------------------------------------
-
+""" return il token persistente dello studente generandolo se assente"""
 def get_or_create_token(student_id: int) -> Optional[str]:
-    """Restituisce il token persistente dello studente, generandolo se assente."""
+
     db = SessionLocal()
     try:
         student = db.query(Student).filter(Student.id == student_id).first()
@@ -55,9 +32,9 @@ def get_or_create_token(student_id: int) -> Optional[str]:
     finally:
         db.close()
 
-
+"""Return lo Student associato al token, se valido."""
 def verify_token(token: str) -> Optional[Student]:
-    """Restituisce lo Student associato al token, se valido."""
+
     if not token:
         return None
     db = SessionLocal()
@@ -66,9 +43,9 @@ def verify_token(token: str) -> Optional[Student]:
     finally:
         db.close()
 
-
+"""Invalida il token lato server (usato al logout esplicito)."""
 def invalidate_token(student_id: int) -> None:
-    """Invalida il token lato server (usato al logout esplicito)."""
+
     if not student_id:
         return
     db = SessionLocal()
@@ -84,9 +61,9 @@ def invalidate_token(student_id: int) -> None:
 # ---------------------------------------------------------------------------
 # Snippet JS lato client
 # ---------------------------------------------------------------------------
-
+"""Scrive il cookie di sessione nel browser (da chiamare dopo il login)."""
 def render_set_cookie(token: str) -> None:
-    """Scrive il cookie di sessione nel browser (da chiamare dopo il login)."""
+
     components.html(
         f"""
         <script>
@@ -97,9 +74,9 @@ def render_set_cookie(token: str) -> None:
         width=0,
     )
 
-
+"""Cancella il cookie di sessione (da chiamare al logout esplicito)."""
 def render_clear_cookie() -> None:
-    """Cancella il cookie di sessione (da chiamare al logout esplicito)."""
+
     components.html(
         f"""
         <script>
@@ -112,13 +89,6 @@ def render_clear_cookie() -> None:
 
 
 def render_cookie_autologin_probe() -> None:
-    """
-    Da chiamare quando lo studente NON è autenticato in session_state e
-    l'URL non contiene già ?token=. Se il browser possiede un cookie di
-    sessione valido, ricarica la pagina aggiungendo il token come query
-    param, così il backend Python può recuperarlo e loggare lo studente
-    automaticamente, senza che debba reinserire le credenziali.
-    """
     components.html(
         f"""
         <script>
