@@ -32,10 +32,24 @@ def _get_sentence_transformer() -> SentenceTransformer:
     """
 class LocalEmbeddingFunction(EmbeddingFunction):
 
+    def __init__(self) -> None:
+        pass
+
     def __call__(self, texts: Documents) -> Embeddings:
         model = _get_sentence_transformer()
         embeddings = model.encode(list(texts), convert_to_numpy=True)
         return embeddings.tolist()
+
+    @staticmethod
+    def name() -> str:
+        return "local-sentence-transformers-all-MiniLM-L6-v2"
+
+    def get_config(self) -> dict:
+        return {}
+
+    @staticmethod
+    def build_from_config(config: dict) -> "LocalEmbeddingFunction":
+        return LocalEmbeddingFunction()
 
 
 local_ef = LocalEmbeddingFunction()
