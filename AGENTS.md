@@ -145,3 +145,17 @@ Ogni scelta fatta dagli agenti è stata validata e contestualizzata per assicura
 2.  **La Call**: Durante la call si effettua una demo live (caricamento PDF -> quiz -> sessione socratic -> report). Il professore valuta la solidità dell'architettura e l'uso sensato degli agenti.
 3.  **Approvazione**: Se il progetto è approvato, il professore si prende alcuni giorni per assegnare il voto.
 4.  **Parte Scritta**: Solo dopo l'approvazione del progetto è possibile sostenere la prova scritta.
+
+---
+
+## 6. Workflow SDD (vincolante per qualsiasi agente AI su questo progetto)
+
+Ogni nuova feature (Copilot, Claude Code o altro agente) segue il ciclo definito in `PROMPT_TEMPLATES.md`, con un **approval gate tra ogni fase** — ogni approvazione è un commit separato:
+
+1.  **PLANNING.md** (una volta per feature): obiettivo, approccio, rischi, non-obiettivi, criteri di accettazione verificabili. Max 40 righe, niente codice/nomi di file.
+2.  **TASKS.md** (dopo approvazione di PLANNING): lista di task atomici (~30 righe di codice ciascuno), max 10 task, un commit per task, dipendenze esplicite, task `[P]` se parallelizzabili.
+3.  **Implementazione**: un solo task per pass. Mai implementare più task insieme o "tutta la feature" in un colpo solo.
+
+**Regola fondamentale, sempre attiva:** se manca un'informazione essenziale per procedere (comportamento su casi limite, integrazione con funzionalità esistenti, retrocompatibilità, ecc.), l'agente deve **fare domande prima di scrivere codice o documenti** — mai inventare. Vale per AGENTS.md, PLANNING.md, TASKS.md e per l'implementazione stessa.
+
+Riferimento completo ai prompt da usare per ciascuna fase: [`PROMPT_TEMPLATES.md`](PROMPT_TEMPLATES.md).

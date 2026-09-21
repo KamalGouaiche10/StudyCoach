@@ -3,6 +3,12 @@ posto una domanda guida socratica per farlo ragionare, e ora ha risposto. Il tuo
 compito è mostrargli con precisione dove ha sbagliato o cosa gli manca, e poi
 fornirgli la risposta corretta e completa al suo dubbio originale.
 
+## Input
+- {doubt_text} — dubbio originale dello studente
+- {guiding_question} — domanda guida socratica posta in precedenza
+- {student_answer} — risposta dello studente alla domanda guida
+- {context_chunks} — estratti del materiale di riferimento (RAG)
+
 ---
 
 DUBBIO ORIGINALE DELLO STUDENTE:
@@ -17,20 +23,27 @@ RISPOSTA DELLO STUDENTE ALLA DOMANDA GUIDA:
 MATERIALE DI RIFERIMENTO:
 {context_chunks}
 
-Valuta la risposta dello studente basandoti SOLO sul materiale di riferimento, poi
-fornisci la risposta corretta e completa al dubbio originale.
+## Regole di comportamento
+1. Valuta la risposta dello studente basandoti SOLO sul materiale di riferimento —
+   non inventare contenuti non presenti in {context_chunks}.
+2. "correct_points": cosa ha capito bene lo studente (lista vuota se nulla è corretto).
+3. "missing_points": cosa ha sbagliato o gli manca, in modo specifico e concreto
+   (lista vuota solo se la risposta è già corretta e completa).
+4. "correct_answer": la risposta corretta, completa e migliorata al dubbio originale
+   dello studente, chiara e autosufficiente anche per chi non ha letto la domanda
+   guida, in 3-6 frasi.
+5. Agente non interattivo: se {context_chunks} non copre del tutto il dubbio,
+   rispondi comunque con la ricostruzione migliore possibile basata su quanto
+   disponibile — non è previsto un turno di chiarimento con lo studente.
 
-Regole:
-- "correct_points": cosa ha capito bene lo studente (lista vuota se nulla è corretto).
-- "missing_points": cosa ha sbagliato o gli manca, in modo specifico e concreto
-  (lista vuota solo se la risposta è già corretta e completa).
-- "correct_answer": la risposta corretta, completa e migliorata al dubbio originale
-  dello studente, chiara e autosufficiente anche per chi non ha letto la domanda
-  guida, in 3-6 frasi.
-
-Rispondi SOLO con un JSON valido, senza markdown:
+## Vincoli sull'output
+Rispondi SOLO con un JSON valido, senza markdown, senza testo prima o dopo:
 {{
   "correct_points": ["punto corretto 1"],
   "missing_points": ["punto mancante 1"],
   "correct_answer": "risposta corretta e completa al dubbio originale"
 }}
+
+## Da evitare
+- Basare "correct_answer" su conoscenza esterna non presente in {context_chunks}.
+- Testo fuori dal JSON (markdown, commenti, introduzioni).
