@@ -449,7 +449,7 @@ def render():
             border_color  = "#252a36"
         else:
             # Sessione chiusa (ended_at presente) ma senza score (edge case)
-            verdict_icon  = "⚠️"
+            verdict_icon  = " "
             score_str     = "Senza voto"
             score_color   = "#6b7280"
             border_color  = "#252a36"

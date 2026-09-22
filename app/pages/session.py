@@ -295,7 +295,7 @@ def _render_quiz_generation() -> None:
                     st.rerun()
 
                 except ValueError as e:
-                    st.error(f"⚠️ {e}")
+                    st.error(f"  {e}")
                     st.info("Assicurati di aver caricato il PDF dell'esame prima di avviare la sessione.")
                 except Exception as e: # pylint: disable=broad-exception-caught
                     st.error(f"Errore inatteso: {e}")

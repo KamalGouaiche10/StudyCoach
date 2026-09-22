@@ -274,7 +274,7 @@ def render():
 
     st.markdown(f"<p style='color:#6b7280; font-size:0.9rem;'>{len(exams)} esame/i</p>", unsafe_allow_html=True)
 
-    # Rendi la homepage simile alla schermata: riga di card (3 per riga) con nome, data e numero fonti, e un bottone Apri sotto ogni card.
+
     cols_per_row = 3
 
     st.markdown("<div style='height:0.5rem'></div>", unsafe_allow_html=True)
@@ -358,7 +358,7 @@ def _render_notes_panel(exam: Exam, student_id: int):
                 )
             st.session_state[cache_key] = notes
         except ValueError as e:
-            st.warning(f"⚠️ {e}")
+            st.warning(f"  {e}")
             return
         except Exception as e: # pylint: disable=broad-exception-caught
             logger.exception("generate_notes failed for exam %s: %s", exam.id, e)

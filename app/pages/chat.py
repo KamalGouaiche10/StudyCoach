@@ -112,12 +112,12 @@ def _handle_new_doubt(student_id: int, exam_id: int, doubt_text: str) -> None:
         try:
             data = tutor.start(doubt_text)
         except ValueError as e:
-            st.session_state.chat_messages.append({"role": "assistant", "content": f"⚠️ {e}"})
+            st.session_state.chat_messages.append({"role": "assistant", "content": f"  {e}"})
             return
         except Exception as e:  # pylint: disable=broad-exception-caught
             st.session_state.chat_messages.append({
                 "role": "assistant",
-                "content": f"⚠️ Errore nel generare la domanda guida: {e}",
+                "content": f"  Errore nel generare la domanda guida: {e}",
             })
             return
 
@@ -135,7 +135,7 @@ def _handle_answer(answer: str) -> None:
         st.session_state.chat_stage = "idle"
         st.session_state.chat_messages.append({
             "role": "assistant",
-            "content": "⚠️ Sessione persa, scrivi di nuovo il tuo dubbio.",
+            "content": "  Sessione persa, scrivi di nuovo il tuo dubbio.",
         })
         return
 
@@ -145,7 +145,7 @@ def _handle_answer(answer: str) -> None:
         except Exception as e:  # pylint: disable=broad-exception-caught
             st.session_state.chat_messages.append({
                 "role": "assistant",
-                "content": f"⚠️ Errore nella valutazione: {e}",
+                "content": f"  Errore nella valutazione: {e}",
             })
             return
 

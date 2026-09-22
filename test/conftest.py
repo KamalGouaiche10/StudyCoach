@@ -1,13 +1,5 @@
 """
-test/conftest.py — Fixture condivise per l'intera suite di test.
-
-Principi:
-- Nessun test tocca il DB reale (data/study_coach.db) o la collection
-  ChromaDB reale (data/chroma): ogni test riceve un DB SQLite temporaneo e
-  una collection ChromaDB temporanea con embedding finti (deterministici,
-  senza scaricare/eseguire il modello sentence-transformers reale).
-- Nessun test chiama un vero LLM (Groq/Gemini/Mistral): gli agenti Agno
-  vengono sostituiti da `FakeAgent`, che restituisce risposte JSON pre-cotte.
+test/conftest.py
 """
 
 import hashlib

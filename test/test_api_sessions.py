@@ -1,9 +1,5 @@
 """
 Integration test — backend/api/sessions.py (via FastAPI TestClient).
-
-Il flusso reale (quiz -> loop socratico -> report) viene esercitato per
-intero: solo il livello LLM (agenti Agno) e' sostituito da FakeAgent, tutto
-il resto (DB, RAG su ChromaDB, AdaptiveEngine, generazione report) e' reale.
 """
 
 import json

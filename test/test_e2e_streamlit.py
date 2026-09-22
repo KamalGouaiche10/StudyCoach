@@ -1,12 +1,6 @@
 """
 E2E test — percorsi utente completi attraverso l'app Streamlit reale
 (app/main.py e le pagine in app/pages/), via streamlit.testing.v1.AppTest.
-
-Nessun browser: AppTest esegue lo script Streamlit vero e proprio (stessa
-logica di rendering, stesso session_state, stessi bottoni/input) in modalita'
-headless. L'unico confine sostituito e' il livello LLM (FakeAgent) e, dove
-serve, l'upload di file via UI (non scriptabile con AppTest: il materiale
-viene indicizzato direttamente con ingest_pdf, bypassando st.file_uploader).
 """
 
 import json

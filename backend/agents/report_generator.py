@@ -59,7 +59,7 @@ def generate_markdown(report: dict,session_id: int,exam_name: str = "Esame",) ->
         f"",f"| Argomento | Media | Tentativi | Stato |",f"|---|---|---|---|",]
 
     for t in breakdown:
-        stato = "⚠️ Da rivedere" if t["is_weak"] else "✅ Padroneggiato"
+        stato = "  Da rivedere" if t["is_weak"] else "✅ Padroneggiato"
         lines.append(  f"| {t['topic']} | {t['avg_score']}/10 | {t['n_attempts']} | {stato} |")
 
     lines += [ f"", f"---", f"", f"## Aree da Rivedere", f"",]
