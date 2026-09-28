@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -7,8 +8,7 @@ import time
 import unicodedata
 
 from agno.agent import Agent
-from agno.models.google import Gemini
-import os
+from agno.models.groq import Groq
 from dotenv import load_dotenv
 
 try:
@@ -19,7 +19,6 @@ except ImportError:
 from backend.agents.ingestor import retrieve_chunks, retrieve_chunks_by_source
 
 load_dotenv()
-GEMINI_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
 
 # ---------------------------------------------------------------------------
 # Costanti
@@ -27,7 +26,7 @@ GEMINI_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
 
 PROMPT_VERSION = "notes_generator_v1"
 PROMPT_PATH = Path(__file__).parent / "prompts" / f"{PROMPT_VERSION}.txt"
-DEFAULT_MODEL = "gemini-3.5-flash"
+DEFAULT_MODEL = "llama-3.3-70b-versatile"
 DEFAULT_N_CHUNKS = 10
 MIN_NOTES_LENGTH = 700
 RETRY_DELAY = 5
@@ -89,7 +88,7 @@ def _parse_error_retry_time(text: str) -> int | None:
 def _make_notes_agent(model_name: str) -> Agent:
     return Agent(
         name="NotesGeneratorAgent",
-        model=Gemini(id=model_name, api_key=GEMINI_KEY),
+        model=Groq(id=model_name),
         description="Professore universitario. Genera appunti accademici in Markdown.",
         markdown=True,
     )
