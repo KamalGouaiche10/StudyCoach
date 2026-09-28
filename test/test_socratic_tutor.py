@@ -1,16 +1,16 @@
 import sys
 import types
 
-if "agno.models.google" not in sys.modules:
-    google_stub = types.ModuleType("agno.models.google")
+if "agno.models.groq" not in sys.modules:
+    groq_stub = types.ModuleType("agno.models.groq")
 
-    class Gemini:  # pragma: no cover - test stub
+    class Groq:  # pragma: no cover - test stub
         def __init__(self, *args, **kwargs):
             self.args = args
             self.kwargs = kwargs
 
-    google_stub.Gemini = Gemini
-    sys.modules["agno.models.google"] = google_stub
+    groq_stub.Groq = Groq
+    sys.modules["agno.models.groq"] = groq_stub
 
 import json
 
