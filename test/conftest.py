@@ -15,20 +15,20 @@ sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "app"))
 
 # ---------------------------------------------------------------------------
-# Stub di agno.models.groq — evita import pesanti/rete per tutta la suite.
+# Stub di agno.models.google — evita import pesanti/rete per tutta la suite.
 # Deve avvenire PRIMA che qualunque modulo backend.agents.* venga importato.
 # ---------------------------------------------------------------------------
 
-if "agno.models.groq" not in sys.modules:
-    _groq_stub = types.ModuleType("agno.models.groq")
+if "agno.models.google" not in sys.modules:
+    _google_stub = types.ModuleType("agno.models.google")
 
-    class Groq:  # pragma: no cover - test stub
+    class Gemini:  # pragma: no cover - test stub
         def __init__(self, *args, **kwargs):
             self.args = args
             self.kwargs = kwargs
 
-    _groq_stub.Groq = Groq
-    sys.modules["agno.models.groq"] = _groq_stub
+    _google_stub.Gemini = Gemini
+    sys.modules["agno.models.google"] = _google_stub
 
 
 # ---------------------------------------------------------------------------

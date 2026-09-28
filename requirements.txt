@@ -1,0 +1,14 @@
+agno
+google-genai
+python-dotenv
+streamlit
+fastapi
+uvicorn
+sqlalchemy
+pydantic
+chromadb
+sentence-transformers
+pypdf
+fpdf2
+requests
+pytest

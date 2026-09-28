@@ -1,16 +1,17 @@
-
 import json
 import re
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from agno.agent import Agent
-from agno.models.groq import Groq
+from agno.models.google import Gemini
+import os
 from dotenv import load_dotenv
 
 from backend.agents.ingestor import retrieve_chunks
 
 load_dotenv()
+GEMINI_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
 
 # ---------------------------------------------------------------------------
 # Costanti
@@ -20,7 +21,7 @@ PROMPT_VERSION = "quiz_generator_v1"
 PROMPT_PATH = Path(__file__).parent / "prompts" / f"{PROMPT_VERSION}.txt"
 DEFAULT_N_QUESTIONS = 5
 DEFAULT_N_CHUNKS = 8
-DEFAULT_MODEL = "llama-3.3-70b-versatile"
+DEFAULT_MODEL = "gemini-3.5-flash"
 RETRY_DELAY = 3
 
 
@@ -116,10 +117,10 @@ def _parse_llm_response(raw: str) -> dict:
 
 
 def _make_quiz_agent(model_name: str) -> Agent:
-    """Crea un Agent Agno con Groq come backend LLM."""
+    """Crea un Agent Agno con Gemini come backend LLM."""
     return Agent(
         name="QuizGeneratorAgent",
-        model=Groq(id=model_name),
+        model=Gemini(id=model_name, api_key=GEMINI_KEY),
         description=(
             "Sei un docente universitario esperto. "
             "Generi domande di esame a risposta aperta basandoti "

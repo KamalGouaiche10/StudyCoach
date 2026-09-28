@@ -13,12 +13,14 @@ from pathlib import Path
 from typing import cast
 
 from agno.agent import Agent
-from agno.models.groq import Groq
+from agno.models.google import Gemini
+import os
 from dotenv import load_dotenv
 
 from backend.agents.ingestor import retrieve_chunks
 
 load_dotenv()
+GEMINI_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
 
 # ---------------------------------------------------------------------------
 # Costanti
@@ -31,9 +33,10 @@ PROMPT_CONTEST = "socratic_tutor_contest_v1"
 PROMPT_DOUBT_OPEN = "socratic_tutor_doubt_open_v1"
 PROMPT_DOUBT_EVAL = "socratic_tutor_doubt_eval_v1"
 
-DEFAULT_MODEL = "llama-3.3-70b-versatile"
+DEFAULT_MODEL = "gemini-3.5-flash"
 DEFAULT_N_CHUNKS = 5
 RETRY_DELAY = 3
+MAX_ATTEMPTS = 6
 
 NON_ANSWER_PATTERNS = (
     r"\bnon\s+so\b",
@@ -286,7 +289,7 @@ def _apply_consistency_guardrails(evaluation: EvaluationResult) -> EvaluationRes
 def _guide_agent(model_name: str) -> Agent:
     return Agent(
         name="SocraticGuideAgent",
-        model=Groq(id=model_name),
+        model=Gemini(id=model_name, api_key=GEMINI_KEY),
         description=(
             "Sei un tutor socratico universitario. "
             "NON dare mai la risposta corretta. "
@@ -300,7 +303,7 @@ def _guide_agent(model_name: str) -> Agent:
 def _eval_agent(model_name: str) -> Agent:
     return Agent(
         name="EvaluatorAgent",
-        model=Groq(id=model_name),
+        model=Gemini(id=model_name, api_key=GEMINI_KEY),
         description=(
             "Sei un valutatore universitario esperto e obiettivo. "
             "Valuta la preparazione dello studente con un voto 0-10. "
@@ -313,7 +316,7 @@ def _eval_agent(model_name: str) -> Agent:
 def _contest_agent(model_name: str) -> Agent:
     return Agent(
         name="ContestationAgent",
-        model=Groq(id=model_name),
+        model=Gemini(id=model_name, api_key=GEMINI_KEY),
         description=(
             "Sei un valutatore universitario imparziale. "
             "Riesamina la valutazione con obiettività dopo la contestazione. "
@@ -326,7 +329,7 @@ def _contest_agent(model_name: str) -> Agent:
 def _doubt_agent(model_name: str) -> Agent:
     return Agent(
         name="DoubtTutorAgent",
-        model=Groq(id=model_name),
+        model=Gemini(id=model_name, api_key=GEMINI_KEY),
         description=(
             "Sei un tutor socratico universitario. Aiuti lo studente a chiarire "
             "un proprio dubbio guidandolo con domande mirate, senza mai rivelare "
@@ -356,6 +359,8 @@ def _generate_guiding_question(
     attempt_num = 0
     while True:
         attempt_num += 1
+        if attempt_num > MAX_ATTEMPTS:
+            raise RuntimeError("LLM non disponibile dopo %d tentativi" % MAX_ATTEMPTS)
         try:
             output = agent.run(prompt, stream=False)
             raw = output.get_content_as_string()
@@ -398,6 +403,8 @@ def _evaluate(
     attempt_num = 0
     while True:
         attempt_num += 1
+        if attempt_num > MAX_ATTEMPTS:
+            raise RuntimeError("LLM non disponibile dopo %d tentativi" % MAX_ATTEMPTS)
         try:
             output = agent.run(prompt, stream=False)
             raw = output.get_content_as_string()
@@ -454,6 +461,8 @@ def _re_evaluate_after_contestation(
     attempt_num = 0
     while True:
         attempt_num += 1
+        if attempt_num > MAX_ATTEMPTS:
+            raise RuntimeError("LLM non disponibile dopo %d tentativi" % MAX_ATTEMPTS)
         try:
             output = agent.run(prompt, stream=False)
             raw = output.get_content_as_string()
@@ -507,6 +516,8 @@ def _generate_opening_question(
     attempt_num = 0
     while True:
         attempt_num += 1
+        if attempt_num > MAX_ATTEMPTS:
+            raise RuntimeError("LLM non disponibile dopo %d tentativi" % MAX_ATTEMPTS)
         try:
             output = agent.run(prompt, stream=False)
             raw = output.get_content_as_string()
@@ -548,6 +559,8 @@ def _evaluate_doubt(
     attempt_num = 0
     while True:
         attempt_num += 1
+        if attempt_num > MAX_ATTEMPTS:
+            raise RuntimeError("LLM non disponibile dopo %d tentativi" % MAX_ATTEMPTS)
         try:
             output = agent.run(prompt, stream=False)
             raw = output.get_content_as_string()
