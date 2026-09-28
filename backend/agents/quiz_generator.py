@@ -9,6 +9,7 @@ from agno.models.groq import Groq
 from dotenv import load_dotenv
 
 from backend.agents.ingestor import retrieve_chunks
+from backend.agents.groq_config import GROQ_MODEL, safe_groq_error
 
 load_dotenv()
 
@@ -20,7 +21,7 @@ PROMPT_VERSION = "quiz_generator_v1"
 PROMPT_PATH = Path(__file__).parent / "prompts" / f"{PROMPT_VERSION}.txt"
 DEFAULT_N_QUESTIONS = 5
 DEFAULT_N_CHUNKS = 8
-DEFAULT_MODEL = "llama-3.3-70b-versatile"
+DEFAULT_MODEL = GROQ_MODEL
 RETRY_DELAY = 3
 
 
@@ -247,7 +248,7 @@ def generate_quiz(
             return result
 
         except Exception as e:
-            print(f"[QuizGenerator] Tentativo {attempt} fallito con errore: {e}. Ritento...")
+            print(f"[QuizGenerator] Tentativo {attempt} fallito ({safe_groq_error(e)}). Ritento...")
             time.sleep(RETRY_DELAY)
             continue
 

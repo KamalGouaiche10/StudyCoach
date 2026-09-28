@@ -1,8 +1,11 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from datetime import datetime
+from datetime import timezone
+from email.utils import parsedate_to_datetime
+from pathlib import Path
+import random
 import re
 import time
 import unicodedata
@@ -17,6 +20,7 @@ except ImportError:
     FPDF = object
 
 from backend.agents.ingestor import retrieve_chunks, retrieve_chunks_by_source
+from backend.agents.groq_config import GROQ_MODEL
 
 load_dotenv()
 
@@ -26,10 +30,14 @@ load_dotenv()
 
 PROMPT_VERSION = "notes_generator_v1"
 PROMPT_PATH = Path(__file__).parent / "prompts" / f"{PROMPT_VERSION}.txt"
-DEFAULT_MODEL = "llama-3.3-70b-versatile"
+DEFAULT_MODEL = GROQ_MODEL
 DEFAULT_N_CHUNKS = 10
 MIN_NOTES_LENGTH = 700
 RETRY_DELAY = 5
+MAX_LLM_ATTEMPTS = 4
+MAX_BACKOFF_SECONDS = 60
+RETRY_SAFETY_MARGIN = 1.0
+MAX_COMPLETION_TOKENS = 2048
 
 # Margini PDF (in mm)
 LEFT_MARGIN = 18
@@ -71,25 +79,94 @@ def _is_error_response(text: str) -> bool:
     return False
 
 
-def _parse_error_retry_time(text: str) -> int | None:
-    match = re.search(r'(?:try again in\s*)?(\d+)h(\d+)m(\d+\.?\d*)s', text, re.IGNORECASE)
+def _parse_error_retry_time(text: str) -> float | None:
+    """Parse explicit retry delays, including fractional seconds; never guess."""
+    prefix = r"(?:(?:try again )?in\s*|wait(?: for)?\s*)?"
+    match = re.search(prefix + r'(\d+)h(?:(\d+)m)?(?:(\d+(?:\.\d+)?)s)?', text, re.IGNORECASE)
     if match:
-        h, m, s = int(match.group(1)), int(match.group(2)), float(match.group(3))
-        return int(h * 3600 + m * 60 + s)
-    match = re.search(r'(\d+)\s*(?:hour|hr|h)', text, re.IGNORECASE)
+        h, m, s = int(match.group(1)), int(match.group(2) or 0), float(match.group(3) or 0)
+        return max(0.0, h * 3600 + m * 60 + s)
+    match = re.search(prefix + r'(\d+(?:\.\d+)?)\s*(seconds?|secs?|s)\b', text, re.IGNORECASE)
     if match:
-        return int(match.group(1)) * 3600
-    match = re.search(r'(\d+)\s*(?:minute|min|m)', text, re.IGNORECASE)
+        return max(0.0, float(match.group(1)))
+    match = re.search(prefix + r'(\d+(?:\.\d+)?)\s*(minutes?|mins?|m)\b', text, re.IGNORECASE)
     if match:
-        return int(match.group(1)) * 60
-    return 60
+        return max(0.0, float(match.group(1)) * 60)
+    return None
+
+
+def _retry_after_seconds(error: Exception) -> float | None:
+    """Read Retry-After from the SDK exception or its attached HTTP response."""
+    response = getattr(error, "response", None)
+    headers = getattr(response, "headers", None) or getattr(error, "headers", None) or {}
+    value = headers.get("Retry-After") or headers.get("retry-after")
+    if value is not None:
+        try:
+            return max(0.0, float(value))
+        except (TypeError, ValueError):
+            try:
+                retry_at = parsedate_to_datetime(str(value))
+                if retry_at.tzinfo is None:
+                    retry_at = retry_at.replace(tzinfo=timezone.utc)
+                return max(0.0, (retry_at - datetime.now(timezone.utc)).total_seconds())
+            except (TypeError, ValueError, OverflowError):
+                pass
+    return _parse_error_retry_time(str(error))
+
+
+def _is_rate_limit_error(error: Exception | str) -> bool:
+    status = getattr(error, "status_code", None)
+    response = getattr(error, "response", None)
+    status = status or getattr(response, "status_code", None)
+    text = str(error).lower()
+    return status == 429 or "rate limit" in text or "rate_limit_exceeded" in text or "too many requests" in text
+
+
+def _api_error_label(error: Exception) -> str:
+    """Logga classe e status dell'errore, mai body o dati della richiesta."""
+    response = getattr(error, "response", None)
+    status = getattr(error, "status_code", None) or getattr(response, "status_code", None)
+    status_label = f"HTTP {status}" if status is not None else "status non disponibile"
+    return f"{status_label} ({type(error).__name__})"
+
+
+def _retry_delay(attempt: int, error: Exception | str | None = None) -> tuple[float, str]:
+    if error is not None:
+        server_delay = _retry_after_seconds(error) if isinstance(error, Exception) else _parse_error_retry_time(error)
+        if server_delay is not None:
+            return server_delay + RETRY_SAFETY_MARGIN, "retry-after Groq"
+    backoff = min(MAX_BACKOFF_SECONDS, RETRY_DELAY * (2 ** (attempt - 1)))
+    jittered = backoff + random.uniform(0, min(1.0, backoff * 0.1))
+    return min(MAX_BACKOFF_SECONDS, jittered), "exponential backoff"
+
+
+def _log_usage(output: object) -> str:
+    usage = getattr(output, "usage", None)
+    if usage is None:
+        usage = getattr(output, "token_usage", None)
+    if usage is None:
+        metrics = getattr(output, "metrics", None)
+        usage = metrics.get("token_usage") if isinstance(metrics, dict) else getattr(metrics, "token_usage", None)
+    if usage is None:
+        return "token usage non disponibile"
+    if isinstance(usage, dict):
+        input_tokens = usage.get("input_tokens", usage.get("prompt_tokens"))
+        output_tokens = usage.get("output_tokens", usage.get("completion_tokens"))
+    else:
+        input_tokens = getattr(usage, "input_tokens", getattr(usage, "prompt_tokens", None))
+        output_tokens = getattr(usage, "output_tokens", getattr(usage, "completion_tokens", None))
+    return f"token input={input_tokens or '?'} output={output_tokens or '?'}"
 
 
 def _make_notes_agent(model_name: str) -> Agent:
     return Agent(
         name="NotesGeneratorAgent",
-        model=Groq(id=model_name),
-        description="Professore universitario. Genera appunti accademici in Markdown.",
+        model=Groq(id=model_name, max_tokens=MAX_COMPLETION_TOKENS),
+        description=(
+            "Genera appunti accademici completi in Markdown sulla base del prompt. "
+            "Rispetta tutti i vincoli richiesti e includi obbligatoriamente una sezione "
+            "con heading esatto `## Riepilogo`. Non aggiungere commenti esterni agli appunti."
+        ),
         markdown=True,
     )
 
@@ -179,10 +256,13 @@ def _clean_chunk(text: str) -> str:
 
 def _clean_chunks(chunks: list[str]) -> list[str]:
     cleaned = []
+    seen = set()
     for chunk in chunks:
         c = _clean_chunk(chunk)
-        if len(c) >= 80:
+        normalized = re.sub(r"\s+", " ", c).casefold()
+        if len(c) >= 80 and normalized not in seen:
             cleaned.append(c)
+            seen.add(normalized)
     return cleaned
 
 
@@ -194,42 +274,104 @@ def _validate_notes(notes: str) -> tuple[bool, str]:
     word_count = len(re.findall(r'\b\w+\b', notes))
     if word_count < MIN_NOTES_LENGTH:
         return False, f"Troppo corto ({word_count} parole)"
-    required = [r'## .*', r'> \*\*Definizione', r'## Riepilogo']
-    for pattern in required:
-        if not re.search(pattern, notes, re.IGNORECASE):
-            return False, f"Manca: {pattern}"
+    if not re.search(r"(?m)^\s*#{1,2}\s+\S+", notes):
+        return False, "Manca: heading di capitolo"
+    if not re.search(r"(?m)^\s*>\s*\*{0,2}\s*Definizione\b", notes, re.IGNORECASE):
+        return False, "Manca: definizione formale"
+    if not _has_summary_heading(notes):
+        return False, "Manca: sezione ## Riepilogo"
     if re.search(r'\\[a-zA-Z]+\^?\*', notes):
         return False, "LaTeX corrotto"
     return True, ""
 
 
+def _has_summary_heading(notes: str) -> bool:
+    # Accetta differenze Markdown minori, suffissi e maiuscole; il prompt
+    # richiede comunque che i nuovi output usino esattamente ## Riepilogo.
+    return bool(re.search(
+        r"(?im)^\s*#{1,6}\s+[*_`]*\s*riepilogo\b[^\n]*$",
+        notes,
+    ))
+
+
+def _summary_correction_prompt(notes: str) -> str:
+    return (
+        "Aggiungi in fondo agli appunti la sola sezione finale richiesta, con il titolo esatto "
+        "`## Riepilogo`, contenente 7-10 punti chiave basati esclusivamente sugli appunti qui sotto. "
+        "Non riscrivere né ripetere gli appunti. Restituisci solo titolo e punti del riepilogo.\n\n"
+        f"APPUNTI:\n{notes}"
+    )
+
+
+def _repair_prompt(notes: str, reason: str) -> str:
+    return (
+        f"Correggi solo il problema indicato: {reason}. Conserva tutti i contenuti utili, "
+        "senza introdurre informazioni non presenti negli appunti. Restituisci il documento "
+        "completo in Markdown, con il titolo esatto `## Riepilogo`.\n\n"
+        f"APPUNTI DA CORREGGERE:\n{notes}"
+    )
+
+
 def _run_with_retry(agent: Agent, prompt: str) -> str:
-    """
-    Interroga l'agente Agno finché non produce appunti validi.
-    Nessun fallback: in caso di errore, rate limit o validazione fallita
-    si ritenta indefinitamente.
-    """
-    attempt = 0
-    while True:
-        attempt += 1
+    """Genera appunti con retry limitati e correzioni mirate della risposta."""
+    current_prompt = prompt
+    current_notes: str | None = None
+    summary_only_correction = False
+    last_reason = "generazione iniziale"
+    msg = "risposta non valida"
+
+    for attempt in range(1, MAX_LLM_ATTEMPTS + 1):
+        model = getattr(getattr(agent, "model", None), "id", DEFAULT_MODEL)
+        print(f"[NotesGenerator] modello={model} tentativo={attempt}/{MAX_LLM_ATTEMPTS} motivo={last_reason}")
         try:
-            output = agent.run(prompt, stream=False)
+            output = agent.run(current_prompt, stream=False)
             response = output.get_content_as_string().strip()
             if _is_error_response(response):
-                wait = _parse_error_retry_time(response)
-                print(f"[NotesGenerator] Errore/rate limit (tentativo {attempt}), attendo {wait or RETRY_DELAY}s...")
-                time.sleep(min(wait or RETRY_DELAY, 60))
-                continue
+                if _is_rate_limit_error(response):
+                    delay, source = _retry_delay(attempt, response)
+                    print(f"[NotesGenerator] retry per HTTP 429 ({source}), delay={delay:.1f}s")
+                    if attempt >= MAX_LLM_ATTEMPTS:
+                        last_reason = "HTTP 429: limite tentativi esaurito"
+                        break
+                    time.sleep(delay)
+                    continue
+                raise RuntimeError("Groq ha restituito un errore API nella risposta")
+
+            if summary_only_correction and current_notes is not None:
+                response = current_notes.rstrip() + "\n\n" + response.lstrip()
             is_valid, msg = _validate_notes(response)
+            print(f"[NotesGenerator] validazione={'ok' if is_valid else msg}; {_log_usage(output)}")
             if is_valid:
                 return response
-            print(f"[NotesGenerator] Validazione fallita (tentativo {attempt}): {msg}. Ritento...")
-            prompt += f"\n\nNOTA: {msg}. Riscrivi in modo più completo."
-            time.sleep(RETRY_DELAY)
-        except Exception as e:
-            print(f"[NotesGenerator] Tentativo {attempt} fallito: {e}. Ritento...")
-            time.sleep(RETRY_DELAY)
 
+            current_notes = response
+            if attempt >= MAX_LLM_ATTEMPTS:
+                last_reason = f"validazione non superata: {msg}"
+                break
+            summary_only_correction = msg == "Manca: sezione ## Riepilogo"
+            current_prompt = (
+                _summary_correction_prompt(current_notes)
+                if summary_only_correction
+                else _repair_prompt(current_notes, msg)
+            )
+            last_reason = f"correzione mirata: {msg}"
+        except Exception as e:
+            delay, source = _retry_delay(attempt, e) if _is_rate_limit_error(e) else _retry_delay(attempt)
+            error_label = _api_error_label(e)
+            print(f"[NotesGenerator] errore Groq {error_label}; retry ({source}), delay={delay:.1f}s")
+            if attempt >= MAX_LLM_ATTEMPTS:
+                raise RuntimeError(
+                    f"NotesGenerator: esauriti {MAX_LLM_ATTEMPTS} tentativi; "
+                    f"ultimo errore {error_label}"
+                ) from e
+            time.sleep(delay)
+            last_reason = "errore API/trasporto"
+            continue
+
+    raise RuntimeError(
+        f"NotesGenerator: {last_reason}; massimo {MAX_LLM_ATTEMPTS} tentativi "
+        f"(ultimo problema: {msg})"
+    )
 
 # ---------------------------------------------------------------------------
 # CLASSE PDF PROFESSIONALE CON LAYOUT CORRETTO

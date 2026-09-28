@@ -5,7 +5,7 @@ backend/session_cookie.py — Login persistente tramite cookie di sessione
 import secrets
 from typing import Optional
 
-import streamlit.components.v1 as components
+import streamlit as st
 
 from backend.db.models import SessionLocal, Student
 
@@ -64,7 +64,7 @@ def invalidate_token(student_id: int) -> None:
 """Scrive il cookie di sessione nel browser (da chiamare dopo il login)."""
 def render_set_cookie(token: str) -> None:
 
-    components.html(
+    st.iframe(
         f"""
         <script>
             document.cookie = "{COOKIE_NAME}={token}; Max-Age={COOKIE_MAX_AGE}; Path=/; SameSite=Lax";
@@ -77,7 +77,7 @@ def render_set_cookie(token: str) -> None:
 """Cancella il cookie di sessione (da chiamare al logout esplicito)."""
 def render_clear_cookie() -> None:
 
-    components.html(
+    st.iframe(
         f"""
         <script>
             document.cookie = "{COOKIE_NAME}=; Max-Age=0; Path=/; SameSite=Lax";
@@ -89,7 +89,7 @@ def render_clear_cookie() -> None:
 
 
 def render_cookie_autologin_probe() -> None:
-    components.html(
+    st.iframe(
         f"""
         <script>
             (function() {{

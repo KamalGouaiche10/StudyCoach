@@ -94,6 +94,8 @@ Almeno una nota per sezione con errori comuni o distinzioni sottili:
 
 Chiudi SEMPRE con questa sezione:
 
+Il titolo Markdown deve essere esattamente `## Riepilogo` (maiuscole e livello `##` inclusi).
+
 ## Riepilogo — Punti Chiave da Memorizzare
 
 Un elenco numerato di 7-10 affermazioni complete (non parole singole) che sintetizzano

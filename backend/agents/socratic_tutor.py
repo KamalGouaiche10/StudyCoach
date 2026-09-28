@@ -17,6 +17,7 @@ from agno.models.groq import Groq
 from dotenv import load_dotenv
 
 from backend.agents.ingestor import retrieve_chunks
+from backend.agents.groq_config import GROQ_MODEL, safe_groq_error
 
 load_dotenv()
 
@@ -31,7 +32,7 @@ PROMPT_CONTEST = "socratic_tutor_contest_v1"
 PROMPT_DOUBT_OPEN = "socratic_tutor_doubt_open_v1"
 PROMPT_DOUBT_EVAL = "socratic_tutor_doubt_eval_v1"
 
-DEFAULT_MODEL = "llama-3.3-70b-versatile"
+DEFAULT_MODEL = GROQ_MODEL
 DEFAULT_N_CHUNKS = 5
 RETRY_DELAY = 3
 
@@ -375,7 +376,7 @@ def _generate_guiding_question(
             return data
 
         except Exception as e:
-            print(f"[SocraticGuideAgent] Tentativo {attempt_num} fallito: {e}. Ritento...")
+            print(f"[SocraticGuideAgent] Tentativo {attempt_num} fallito ({safe_groq_error(e)}). Ritento...")
             time.sleep(RETRY_DELAY)
             continue
 
@@ -425,7 +426,7 @@ def _evaluate(
             return evaluation
 
         except Exception as e:
-            print(f"[EvaluatorAgent] Tentativo {attempt_num} fallito: {e}. Ritento...")
+            print(f"[EvaluatorAgent] Tentativo {attempt_num} fallito ({safe_groq_error(e)}). Ritento...")
             time.sleep(RETRY_DELAY)
             continue
 
@@ -483,7 +484,7 @@ def _re_evaluate_after_contestation(
             )
 
         except Exception as e:
-            print(f"[ContestationAgent] Tentativo {attempt_num} fallito: {e}. Ritento...")
+            print(f"[ContestationAgent] Tentativo {attempt_num} fallito ({safe_groq_error(e)}). Ritento...")
             time.sleep(RETRY_DELAY)
             continue
 
@@ -526,7 +527,7 @@ def _generate_opening_question(
             return data
 
         except Exception as e:
-            print(f"[DoubtTutorAgent] Tentativo {attempt_num} fallito: {e}. Ritento...")
+            print(f"[DoubtTutorAgent] Tentativo {attempt_num} fallito ({safe_groq_error(e)}). Ritento...")
             time.sleep(RETRY_DELAY)
             continue
 
@@ -571,7 +572,7 @@ def _evaluate_doubt(
             )
 
         except Exception as e:
-            print(f"[DoubtTutorAgent] Tentativo {attempt_num} fallito: {e}. Ritento...")
+            print(f"[DoubtTutorAgent] Tentativo {attempt_num} fallito ({safe_groq_error(e)}). Ritento...")
             time.sleep(RETRY_DELAY)
             continue
 
