@@ -7,6 +7,8 @@ risposta dello studente, mostra dove ha sbagliato e la risposta corretta
 e migliorata, basandosi sui PDF caricati per l'esame.
 """
 
+from app.ui import brand, page_heading, empty_state, agent_status
+
 import sys
 from pathlib import Path
 
@@ -16,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from backend.agents.socratic_tutor import DoubtTutor  # pylint: disable=wrong-import-position
 
-ASSISTANT_AVATAR = "🎓"
+ASSISTANT_AVATAR = ":material/school:"
 
 
 # ── Guards ─────────────────────────────────────────────────────────────────
@@ -61,28 +63,29 @@ def render() -> None:
     exam = st.session_state.current_exam
     student_id = st.session_state.student_id
 
-    col_title, col_back = st.columns([4, 1])
-    with col_title:
-        st.markdown(f"""
-        <h2 style="font-family:'Syne',sans-serif; margin-bottom:0.2rem;">💬 Chiedi al tutor</h2>
-        <p style="color:#6b7280; margin-bottom:0.5rem;">
-            Scrivi un dubbio su «{exam['name']}». Il tutor non ti darà subito la
-            risposta: ti farà prima una domanda per aiutarti a ragionare.
-        </p>
-        """, unsafe_allow_html=True)
-    with col_back:
-        if st.button("🔙 Indietro", use_container_width=True):
+    nav, back, reset = st.columns([3, 1, 1], vertical_alignment="center")
+    with nav:
+        brand(exam["name"])
+        st.html('<span class="sc-reading-page" aria-hidden="true"></span>')
+    with back:
+        if st.button("Esame", icon=":material/arrow_back:", use_container_width=True):
             st.session_state.current_page = "exam"
             st.rerun()
-        if st.button("🗑️ Nuova chat", use_container_width=True):
+    with reset:
+        if st.button("Nuova chat", icon=":material/add:", use_container_width=True):
             _reset_chat_state()
             st.rerun()
-
-    st.markdown("<hr style='border-color:#252a36; margin:0.5rem 0 1rem'>", unsafe_allow_html=True)
+    st.html('<hr class="sc-divider">')
+    page_heading("Chiedi al tutor", "Un dubbio alla volta. Ragioniamo insieme a partire dalle fonti dell’esame.")
+    if not st.session_state.chat_messages:
+        empty_state("Da cosa vuoi partire?", "Descrivi un concetto che non ti è chiaro. Riceverai una domanda guida, poi un feedback sulla tua risposta.", "chat")
+        st.caption("Per esempio: «Non capisco la differenza tra questi due concetti: …»")
+    agent_status("Tutor socratico", "In attesa della tua risposta" if st.session_state.chat_stage == "waiting_answer" else "Pronto per un nuovo dubbio")
 
     for msg in st.session_state.chat_messages:
         avatar = ASSISTANT_AVATAR if msg["role"] == "assistant" else None
         with st.chat_message(msg["role"], avatar=avatar):
+            st.caption("Tutor socratico" if msg["role"] == "assistant" else "Tu")
             st.markdown(msg["content"])
 
     stage = st.session_state.chat_stage

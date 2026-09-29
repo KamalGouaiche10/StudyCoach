@@ -2,6 +2,8 @@
 pages/login.py — Login e Registrazione
 """
 
+from app.ui import logo
+
 import hashlib
 import sys
 from pathlib import Path
@@ -13,7 +15,6 @@ import streamlit as st
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from backend.db.models import SessionLocal, Student, init_db # pylint: disable=wrong-import-position
-from backend.session_cookie import get_or_create_token, render_set_cookie # pylint: disable=wrong-import-position
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
@@ -97,26 +98,13 @@ def render():
         st.session_state.current_page = "upload"
         st.rerun()
 
-    # Layout centrato
-    st.markdown("""
-    <div style="text-align:center; padding: 3rem 0 1.5rem;">
-        <div style="font-size:3rem; margin-bottom:0.5rem;">🎓</div>
-        <h1 style="font-family:'Syne',sans-serif; font-size:2.4rem; margin:0;
-                   background: linear-gradient(135deg, #6c63ff, #00d4aa);
-                   -webkit-background-clip:text; -webkit-text-fill-color:transparent;">
-            Study Coach
-        </h1>
-        <p style="color:#6b7280; margin-top:0.4rem; font-size:0.95rem;">
-            Il tuo tutor AI per prepararti agli esami universitari
-        </p>
-    </div>
-    """, unsafe_allow_html=True)
+    st.html(f'''<div class="sc-login sc:text-center"><div class="sc:flex sc:justify-center sc:mb-6">{logo(56)}</div><div class="sc-eyebrow">STUDY COACH</div><h1>Fai spazio a ciò che impari.</h1><p class="sc:text-muted sc:text-sm">I tuoi materiali, le domande giuste, un passo avanti ogni giorno.</p></div>''')
 
     # Tabs Login / Registrazione
-    col_center = st.columns([1, 2, 1])[1]
+    col_center = st.columns([1, 3, 1])[1]
 
     with col_center:
-        tab_login, tab_reg = st.tabs(["🔐 Accedi", "✨ Registrati"])
+        tab_login, tab_reg = st.tabs(["Accedi", "Registrati"])
 
         # ── TAB LOGIN ──────────────────────────────────────────────────────
         with tab_login:
@@ -129,9 +117,6 @@ def render():
             if st.button("Accedi", type="primary", use_container_width=True, key="btn_login"):
                 ok, msg = _login(username, password)
                 if ok:
-                    token = get_or_create_token(st.session_state.student_id)
-                    if token:
-                        render_set_cookie(token)
                     st.success("Bentornato!")
                     st.rerun()
                 else:
@@ -149,9 +134,6 @@ def render():
             if st.button("Crea account", type="primary", use_container_width=True, key="btn_reg"):
                 ok, msg = _register(new_user, new_pwd, new_pwd2)
                 if ok:
-                    token = get_or_create_token(st.session_state.student_id)
-                    if token:
-                        render_set_cookie(token)
                     st.success("Account creato! Benvenuto 🎉")
                     st.rerun()
                 else:
@@ -159,7 +141,7 @@ def render():
 
         # Footer
         st.markdown("""
-        <div style="text-align:center; margin-top:2rem; color:#4b5563; font-size:0.8rem;">
-            Studio socratico potenziato dall'AI · Gemini + ChromaDB
+        <div style="text-align:center; margin-top:2rem; color:var(--quiet); font-size:0.8rem;">
+            Il tuo spazio personale per preparare gli esami.
         </div>
         """, unsafe_allow_html=True)

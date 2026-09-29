@@ -1,8 +1,7 @@
-"""
-backend/session_cookie.py — Login persistente tramite cookie di sessione
-"""
+﻿"""Persistent login: server validation and browser cookie synchronization."""
 
 import secrets
+from pathlib import Path
 from typing import Optional
 
 import streamlit as st
@@ -10,17 +9,12 @@ import streamlit as st
 from backend.db.models import SessionLocal, Student
 
 COOKIE_NAME = "sc_token"
-COOKIE_MAX_AGE = 10 * 365 * 24 * 60 * 60  # ~10 anni: emula "nessuna scadenza"
+COOKIE_MAX_AGE = 10 * 365 * 24 * 60 * 60
 
 
-# ---------------------------------------------------------------------------
-# Gestione token lato DB
-# ---------------------------------------------------------------------------
-""" return il token persistente dello studente generandolo se assente"""
 def get_or_create_token(student_id: int) -> Optional[str]:
-
-    db = SessionLocal()
-    try:
+    """Return the student's persistent token, creating it when needed."""
+    with SessionLocal() as db:
         student = db.query(Student).filter(Student.id == student_id).first()
         if not student:
             return None
@@ -29,81 +23,67 @@ def get_or_create_token(student_id: int) -> Optional[str]:
             db.commit()
             db.refresh(student)
         return student.session_token
-    finally:
-        db.close()
 
-"""Return lo Student associato al token, se valido."""
+
 def verify_token(token: str) -> Optional[Student]:
-
-    if not token:
+    if not isinstance(token, str) or not token:
         return None
-    db = SessionLocal()
-    try:
+    with SessionLocal() as db:
         return db.query(Student).filter(Student.session_token == token).first()
-    finally:
-        db.close()
 
-"""Invalida il token lato server (usato al logout esplicito)."""
+
 def invalidate_token(student_id: int) -> None:
-
+    """Explicit logout revokes the credential even if cookie deletion fails."""
     if not student_id:
         return
-    db = SessionLocal()
-    try:
+    with SessionLocal() as db:
         student = db.query(Student).filter(Student.id == student_id).first()
         if student:
             student.session_token = None
             db.commit()
-    finally:
-        db.close()
 
 
-# ---------------------------------------------------------------------------
-# Snippet JS lato client
-# ---------------------------------------------------------------------------
-"""Scrive il cookie di sessione nel browser (da chiamare dopo il login)."""
+def _sync_cookie(value: str) -> None:
+    """Write on the app origin and report whether the browser accepted it."""
+    component = st.components.v2.component(
+        "study_coach_session_cookie",
+        js=Path(__file__).with_suffix(".js").read_text(encoding="utf-8"),
+    )
+    key = "_session_cookie_sync"
+    previous = st.session_state.get(key, {})
+    result = component(
+        key=key,
+        data={
+            "name": COOKIE_NAME,
+            "value": value,
+            "maxAge": COOKIE_MAX_AGE if value else 0,
+            "reported": previous.get("status"),
+        },
+        on_status_change=lambda: None,
+        height="content",
+    )
+    if value and result.status == "blocked":
+        st.warning("Il browser non salva il cookie di accesso. Consenti i cookie per questo sito per restare connesso dopo un aggiornamento.")
+
+
 def render_set_cookie(token: str) -> None:
+    """Call from the authenticated app shell, never immediately before rerun."""
+    _sync_cookie(token)
 
-    st.iframe(
-        f"""
-        <script>
-            document.cookie = "{COOKIE_NAME}={token}; Max-Age={COOKIE_MAX_AGE}; Path=/; SameSite=Lax";
-        </script>
-        """,
-        height=1,
-        width=1,
-    )
 
-"""Cancella il cookie di sessione (da chiamare al logout esplicito)."""
 def render_clear_cookie() -> None:
-
-    st.iframe(
-        f"""
-        <script>
-            document.cookie = "{COOKIE_NAME}=; Max-Age=0; Path=/; SameSite=Lax";
-        </script>
-        """,
-        height=1,
-        width=1,
-    )
+    """Call on the logged-out screen after invalidating the DB token."""
+    _sync_cookie("")
 
 
-def render_cookie_autologin_probe() -> None:
-    st.iframe(
-        f"""
-        <script>
-            (function() {{
-                var match = document.cookie.match(new RegExp('(^| ){COOKIE_NAME}=([^;]+)'));
-                var token = match ? match[2] : null;
-                var loc = window.parent.location;
-                var search = loc.search || "";
-                if (token && search.indexOf("token=") === -1) {{
-                    var sep = search.length ? "&" : "?";
-                    loc.search = search + sep + "token=" + token;
-                }}
-            }})();
-        </script>
-        """,
-        height=1,
-        width=1,
-    )
+def restore_login_from_cookie() -> bool:
+    """A refresh opens a new WebSocket with the browser's saved cookie."""
+    token = st.context.cookies.get(COOKIE_NAME, "")
+    student = verify_token(token) if token else None
+    if student is None:
+        return False
+    st.session_state.authenticated = True
+    st.session_state.student_id = student.id
+    st.session_state.username = student.username
+    st.session_state.current_page = "upload"
+    return True

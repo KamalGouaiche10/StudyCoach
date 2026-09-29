@@ -3,6 +3,9 @@ pages/session.py — Sessione attiva di studio socratico
 Loop: genera quiz → per ogni domanda → risposta1 → guida → risposta2 → valutazione → (contestazione) → prossima
 """
 
+from html import escape
+from app.ui import brand, empty_state, study_steps, agent_status
+
 import json
 import sys
 from datetime import datetime, timezone
@@ -83,17 +86,10 @@ def _navbar() -> None:
     exam: dict = st.session_state.current_exam
     col1, col2 = st.columns([4, 1])
     with col1:
-        st.markdown(f"""
-        <span style="font-family:'Syne',sans-serif; font-size:1.1rem; font-weight:700; color:#6b7280;">
-            🎓 Study Coach
-        </span>
-        <span style="color:#252a36; margin:0 0.5rem">›</span>
-        <span style="font-family:'Syne',sans-serif; font-size:1.1rem; font-weight:800; color:#e8eaf0;">
-            {exam['name']}
-        </span>
-        """, unsafe_allow_html=True)
+        brand(exam["name"])
+        st.html('<span class="sc-reading-page" aria-hidden="true"></span>')
     with col2:
-        if st.button("← Esci", use_container_width=True):
+        if st.button("Esci", icon=":material/arrow_back:", help="Termina la sessione e torna agli esami", use_container_width=True):
             # se c'è una sessione parzialmente completata,
             # chiude la sessione nel DB (ended_at=now, qa_log parziale)
             # così non appare come "Non completata" senza dati in history.
@@ -103,7 +99,7 @@ def _navbar() -> None:
             st.session_state.current_page = "upload"
             st.session_state.current_exam = None
             st.rerun()
-    st.markdown("<hr style='border-color:#252a36; margin:0.5rem 0 1rem'>", unsafe_allow_html=True)
+    st.markdown("<hr style='border-color:var(--border); margin:0.5rem 0 1rem'>", unsafe_allow_html=True)
 
 
 def _mark_session_interrupted(sess: dict) -> None:
@@ -144,12 +140,12 @@ def _progress_bar(current: int, total: int, scores: list) -> None:
         st.progress(pct)
     with col2:
         st.markdown(
-            f"<div style='text-align:center; font-size:0.85rem; color:#6b7280;'>"
+            f"<div style='text-align:center; font-size:0.85rem; color:var(--muted);'>"
             f"{current}/{total} domande</div>",
             unsafe_allow_html=True,
         )
     with col3:
-        css = "score-high" if avg >= 8 else ("score-mid" if avg >= 6 else "score-low")
+        css = "sc-meta" if not scores else ("score-high" if avg >= 8 else ("score-mid" if avg >= 6 else "score-low"))
         st.markdown(
             f"<div class='{css}' style='text-align:center; font-size:0.85rem;'>"
             f"Media: {avg if scores else '—'}</div>",
@@ -159,8 +155,7 @@ def _progress_bar(current: int, total: int, scores: list) -> None:
 
 def _score_badge(score: int) -> str:
     css  = "score-high" if score >= 8 else ("score-mid" if score >= 6 else "score-low")
-    icon = "🟢" if score >= 8 else ("🟡" if score >= 6 else "🔴")
-    return f"<span class='{css}'>{icon} {score}/10</span>"
+    return f"<span class='{css}'>{score}/10</span>"
 
 
 def _diff_badge(diff: str) -> str:
@@ -238,23 +233,15 @@ def _save_session(session_id: int,attempts: list,engine: AdaptiveEngine,exam: di
 def _render_quiz_generation() -> None:
     exam: dict = st.session_state.current_exam
 
-    st.markdown("""
-    <div style="text-align:center; padding:2.5rem 0;">
-        <div style="font-size:2.5rem; margin-bottom:0.75rem;">📝</div>
-        <h2 style="font-family:'Syne',sans-serif; margin-bottom:0.5rem;">Pronto per studiare?</h2>
-        <p style="color:#6b7280; max-width:420px; margin:0 auto;">
-            Generero domande a risposta aperta basate sul materiale che hai caricato,
-            poi ti guidero con il metodo socratico.
-        </p>
-    </div>
-    """, unsafe_allow_html=True)
+    empty_state("Prepariamo la tua sessione", "Scegli quante domande affrontare. Partiremo dai tuoi PDF, ragioneremo insieme e raccoglieremo i punti da ripassare.", "study")
 
-    _l, col_c, _r = st.columns([1, 2, 1])
+    _l, col_c, _r = st.columns([1, 4, 1])
     with col_c:
+        study_steps()
         n_q: int = st.slider("Numero di domande", min_value=3, max_value=10, value=5, key="n_questions_slider")
         st.markdown("<div style='height:0.75rem'></div>", unsafe_allow_html=True)
 
-        if st.button("🚀 Genera domande", type="primary", use_container_width=True):
+        if st.button("Genera domande", icon=":material/arrow_forward:", key="generate_questions", type="primary", use_container_width=True):
             with st.spinner("Recupero materiale e genero le domande..."):
                 try:
                     quiz = generate_quiz(
@@ -338,26 +325,27 @@ def _render_active_session() -> None:
     current_q: dict = st.session_state.get("_current_q") or {}
     q_num: int      = done_q + 1
 
+    study_steps(0 if state == "answer1" else (1 if state == "answer2" else 2))
     st.markdown(f"""
-    <div class="sc-card" style="border-left:3px solid #6c63ff; margin-bottom:1.25rem;">
+    <div class="sc-question">
         <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:0.5rem;">
-            <span style="color:#6b7280; font-size:0.82rem; font-weight:600; letter-spacing:0.05em; text-transform:uppercase;">
+            <span style="color:var(--muted); font-size:0.82rem; font-weight:600; letter-spacing:0.05em; text-transform:uppercase;">
                 Domanda {q_num} di {total_q}
             </span>
             {_diff_badge(str(current_q.get('difficulty', 'intermedia')))}
         </div>
-        <p style="font-family:'Syne',sans-serif; font-size:1.1rem; font-weight:700; margin:0; line-height:1.5;">
-            {current_q.get('text', '')}
+        <p class="sc-question-text">
+            {escape(str(current_q.get('text', '')))}
         </p>
-        <div style="color:#4b5563; font-size:0.78rem; margin-top:0.5rem;">
-            🏷 {current_q.get('topic_hint', '')}
+        <div style="color:var(--quiet); font-size:0.78rem; margin-top:0.5rem;">
+            Argomento · {escape(str(current_q.get('topic_hint', '')))}
         </div>
     </div>
     """, unsafe_allow_html=True)
 
     # ── Prima risposta ─────────────────────────────────────────────────────
     if state == "answer1":
-        st.markdown("**📝 La tua prima risposta:**")
+        agent_status("Tutor socratico", "In attesa della tua prima risposta")
         ans1: str = str(st.text_area(
             "Rispondi", key="input_ans1", height=130,
             placeholder="Scrivi qui la tua risposta...", label_visibility="collapsed",
@@ -381,39 +369,39 @@ def _render_active_session() -> None:
         ans1_text: str = str(attempt.student_answer_1)
 
         st.markdown(f"""
-        <div class="sc-card" style="background:#0f1319; margin-bottom:0.75rem;">
-            <div style="font-size:0.78rem; color:#6b7280; margin-bottom:0.3rem; text-transform:uppercase; letter-spacing:0.05em;">
+        <div class="sc-card" style="background:var(--surface); margin-bottom:0.75rem;">
+            <div style="font-size:0.78rem; color:var(--muted); margin-bottom:0.3rem; text-transform:uppercase; letter-spacing:0.05em;">
                 La tua prima risposta
             </div>
-            <p style="margin:0; color:#9ca3af; font-size:0.9rem;">{ans1_text}</p>
+            <p style="margin:0; color:var(--muted); font-size:0.9rem;">{ans1_text}</p>
         </div>
         """, unsafe_allow_html=True)
 
         if guide.get("positive_feedback"):
             st.markdown(f"""
-            <div style="padding:0.6rem 0.9rem; background:#1a1f2e; border-radius:8px; margin-bottom:0.5rem;
-                        border-left:3px solid #00d4aa; font-size:0.88rem; color:#a7f3d0;">
+            <div style="padding:0.6rem 0.9rem; background:var(--surface-raised); border-radius:8px; margin-bottom:0.5rem;
+                        border-left:3px solid var(--success); font-size:0.88rem; color:var(--success);">
                 ✅ {guide['positive_feedback']}
             </div>
             """, unsafe_allow_html=True)
 
         focus_html: str = (
-            f'<div style="margin-top:0.5rem; font-size:0.78rem; color:#6b7280;">Focus: {guide["focus_area"]}</div>'
+            f'<div style="margin-top:0.5rem; font-size:0.78rem; color:var(--muted);">Focus: {guide["focus_area"]}</div>'
             if guide.get("focus_area") else ""
         )
         st.markdown(f"""
-        <div style="padding:0.9rem 1rem; background:#1a1a2e; border-radius:10px; margin-bottom:1rem;
-                    border-left:3px solid #6c63ff;">
-            <div style="font-size:0.78rem; color:#818cf8; margin-bottom:0.4rem; text-transform:uppercase;
+        <div style="padding:0.9rem 1rem; background:var(--surface-raised); border-radius:10px; margin-bottom:1rem;
+                    border-left:3px solid var(--accent);">
+            <div style="font-size:0.78rem; color:var(--accent); margin-bottom:0.4rem; text-transform:uppercase;
                         letter-spacing:0.05em; font-weight:600;">🧠 Domanda guida socratica</div>
-            <p style="margin:0; font-family:'Syne',sans-serif; font-weight:600; font-size:1rem; line-height:1.5;">
+            <p style="margin:0; font-family:var(--font-ui); font-weight:600; font-size:1rem; line-height:1.5;">
                 {guide.get('guiding_question', '')}
             </p>
             {focus_html}
         </div>
         """, unsafe_allow_html=True)
 
-        st.markdown("**✍️ La tua seconda risposta (dopo la guida):**")
+        agent_status("Tutor socratico", "In attesa della tua risposta dopo la guida")
         ans2: str = str(st.text_area(
             "Seconda risposta", key="input_ans2", height=130,
             placeholder="Integra e approfondisci...", label_visibility="collapsed",
@@ -435,7 +423,7 @@ def _render_active_session() -> None:
         guide:  dict          = st.session_state.get("_guide_result") or {}
         tutor:  SocraticTutor = st.session_state.tutor
         attempt: QuestionAttempt = tutor.attempt  # type: ignore[assignment]
-        border: str = "#10b981" if score >= 8 else ("#f59e0b" if score >= 6 else "#f43f5e")
+        border: str = "var(--success)" if score >= 8 else ("var(--warning)" if score >= 6 else "var(--danger)")
 
         with st.expander("📜 Risposte date", expanded=False):
             st.markdown(f"**Prima risposta:** {str(attempt.student_answer_1)}")
@@ -445,11 +433,11 @@ def _render_active_session() -> None:
         st.markdown(f"""
         <div class="sc-card" style="border-left:3px solid {border};">
             <div style="display:flex; align-items:center; gap:1rem; margin-bottom:0.75rem;">
-                <div style="font-size:2.5rem; font-family:'Syne',sans-serif; font-weight:800; color:{border};">
+                <div style="font-size:2.5rem; font-family:var(--font-ui); font-weight:600; color:{border};">
                     {score}/10
                 </div>
                 <div style="flex:1;">
-                    <div style="font-size:0.82rem; color:#6b7280; margin-bottom:0.3rem;">Valutazione</div>
+                    <div style="font-size:0.82rem; color:var(--muted); margin-bottom:0.3rem;">Valutazione</div>
                     <div style="font-size:0.9rem;">{ev.get('motivation', '')}</div>
                 </div>
             </div>
@@ -470,8 +458,8 @@ def _render_active_session() -> None:
 
         if ev.get("improvement_after_guidance"):
             st.markdown(f"""
-            <div style="padding:0.6rem 0.9rem; background:#1a1f2e; border-radius:8px; margin-top:0.5rem;
-                        font-size:0.88rem; color:#93c5fd; border-left:3px solid #3b82f6;">
+            <div style="padding:0.6rem 0.9rem; background:var(--surface-raised); border-radius:8px; margin-top:0.5rem;
+                        font-size:0.88rem; color:var(--info); border-left:3px solid var(--info);">
                 📈 <em>{ev['improvement_after_guidance']}</em>
             </div>
             """, unsafe_allow_html=True)
@@ -504,21 +492,21 @@ def _render_active_session() -> None:
         final_score: int  = int(cr.get("final_score", 0))
         delta:       int  = int(cr.get("score_delta", 0))
         assessment:  str  = str(cr.get("contestation_assessment", "non_valido"))
-        color_map = {"valido": "#10b981", "parzialmente_valido": "#f59e0b", "non_valido": "#f43f5e"}
-        color:       str  = color_map.get(assessment, "#6b7280")
-        score_color: str  = "#10b981" if final_score >= 8 else ("#f59e0b" if final_score >= 6 else "#f43f5e")
+        color_map = {"valido": "var(--success)", "parzialmente_valido": "var(--warning)", "non_valido": "var(--danger)"}
+        color:       str  = color_map.get(assessment, "var(--muted)")
+        score_color: str  = "var(--success)" if final_score >= 8 else ("var(--warning)" if final_score >= 6 else "var(--danger)")
         delta_text:  str  = f"+{delta} punto/i" if delta > 0 else "voto invariato"
 
         st.markdown(f"""
         <div class="sc-card" style="border-left:3px solid {color};">
-            <div style="font-size:0.78rem; color:#6b7280; margin-bottom:0.5rem; text-transform:uppercase; letter-spacing:0.05em;">
+            <div style="font-size:0.78rem; color:var(--muted); margin-bottom:0.5rem; text-transform:uppercase; letter-spacing:0.05em;">
                 ⚖️ Contestazione: <span style="color:{color}; font-weight:700;">{assessment.replace('_', ' ')}</span>
                 &nbsp;&mdash;&nbsp; {delta_text}
             </div>
-            <div style="font-size:2rem; font-family:'Syne',sans-serif; font-weight:800; color:{score_color};">
+            <div style="font-size:2rem; font-family:var(--font-ui); font-weight:600; color:{score_color};">
                 {final_score}/10
             </div>
-            <p style="margin-top:0.5rem; font-size:0.9rem; color:#d1d5db;">
+            <p style="margin-top:0.5rem; font-size:0.9rem; color:var(--text);">
                 {cr.get('response_to_student', '')}
             </p>
         </div>
@@ -596,20 +584,20 @@ def _render_session_complete() -> None:
         )
 
     if avg >= 8:
-        emoji, label, color = "🏆", "Ottimo!", "#10b981"
+        emoji, label, color = "🏆", "Ottimo!", "var(--success)"
     elif avg >= 6:
-        emoji, label, color = "👍", "Sufficiente", "#f59e0b"
+        emoji, label, color = "👍", "Sufficiente", "var(--warning)"
     else:
-        emoji, label, color = "📚", "Da rivedere", "#f43f5e"
+        emoji, label, color = "📚", "Da rivedere", "var(--danger)"
 
     st.markdown(f"""
     <div style="text-align:center; padding:2rem 0 1.5rem;">
         <div style="font-size:3.5rem; margin-bottom:0.5rem;">{emoji}</div>
-        <h2 style="font-family:'Syne',sans-serif; font-size:2rem; margin-bottom:0.25rem;">{label}</h2>
-        <div style="font-size:3rem; font-weight:800; color:{color}; font-family:'Syne',sans-serif;">
+        <h2 style="font-family:var(--font-ui); font-size:2rem; margin-bottom:0.25rem;">{label}</h2>
+        <div style="font-size:3rem; font-weight:600; color:{color}; font-family:var(--font-ui);">
             {avg}/10
         </div>
-        <p style="color:#6b7280; margin-top:0.5rem;">
+        <p style="color:var(--muted); margin-top:0.5rem;">
             {len(scores)} domande completate · sessione #{sess['id']}
         </p>
     </div>
@@ -626,7 +614,7 @@ def _render_session_complete() -> None:
         <div class="sc-card" style="padding:0.75rem 1rem;">
             <div style="display:flex; justify-content:space-between; align-items:center;">
                 <div style="flex:1;">
-                    <span style="color:#6b7280; font-size:0.78rem;">Q{i}</span>
+                    <span style="color:var(--muted); font-size:0.78rem;">Q{i}</span>
                     <span style="margin-left:0.5rem; font-size:0.9rem;">{short}</span>
                 </div>
                 <div style="margin-left:1rem;">{_score_badge(int(score))}</div>

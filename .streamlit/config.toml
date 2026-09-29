@@ -1,0 +1,17 @@
+[theme]
+base = "dark"
+primaryColor = "#bdd5bf"
+backgroundColor = "#111513"
+secondaryBackgroundColor = "#1b211d"
+textColor = "#e8eee9"
+font = "sans serif"
+borderColor = "#303b33"
+baseRadius = "0.5rem"
+buttonRadius = "0.5rem"
+redColor = "#eda69e"
+yellowColor = "#e4c28b"
+greenColor = "#a6cfb2"
+blueColor = "#b1c5cf"
+
+[client]
+toolbarMode = "minimal"

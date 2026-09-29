@@ -11,6 +11,13 @@ from streamlit.testing.v1 import AppTest
 
 MAIN_APP = Path(__file__).resolve().parent.parent / "app" / "main.py"
 
+
+@pytest.fixture(autouse=True)
+def browser_request_cookies(monkeypatch):
+    # AppTest has no real HTTP request; its default context cookies are mocks.
+    from streamlit.runtime.context import ContextProxy
+    monkeypatch.setattr(ContextProxy, "cookies", property(lambda self: {}))
+
 QUIZ_JSON = json.dumps({
     "source_name": "Analisi 1",
     "questions": [
@@ -223,7 +230,7 @@ def test_e2e_first_question_socratic_loop_with_contestation(monkeypatch, fake_ag
     assert not at.exception
 
     at.slider(key="n_questions_slider").set_value(3).run(timeout=30)
-    _label(at.button, "🚀 Genera domande").click().run(timeout=30)
+    at.button(key="generate_questions").click().run(timeout=30)
     assert not at.exception
     assert at.session_state["tutor_state"] == "answer1"
     first_question_id = at.session_state["current_session"]["questions"][0]["id"]
@@ -327,3 +334,134 @@ def test_e2e_doubt_chatbot_without_indexed_material_shows_warning():
     assert at.session_state["chat_stage"] == "idle"
     last_message = at.session_state["chat_messages"][-1]["content"]
     assert "Non ho trovato materiale" in last_message
+
+
+def test_e2e_exam_notes_and_history_remain_accessible(monkeypatch, sample_pdf_path):
+    """The new workspace keeps notes, source metadata and history reachable."""
+    from datetime import datetime, timezone
+    from backend.agents import notes_generator
+    from backend.db.models import Exam, Material, Session, SessionLocal
+
+    student_id = _seed_student()
+    with SessionLocal() as db:
+        exam = Exam(student_id=student_id, name="Algoritmi & strutture")
+        db.add(exam)
+        db.flush()
+        exam_id = exam.id
+        db.add(Material(
+            exam_id=exam_id, filename="grafi.pdf", stored_path=str(sample_pdf_path),
+            pages_count=2, chunks_count=3,
+        ))
+        session = Session(
+            exam_id=exam_id, score_total=8,
+            ended_at=datetime.now(timezone.utc),
+            qa_log=json.dumps([{
+                "question_text": "Come rappresenti un grafo?", "final_score": 8,
+                "difficulty": "base", "student_answer_1": "Con una lista di adiacenza.",
+            }]),
+        )
+        db.add(session)
+        db.commit()
+
+    monkeypatch.setattr(
+        notes_generator, "generate_notes_pdf_from_materials",
+        lambda **kwargs: sample_pdf_path.read_bytes(),
+    )
+    at = AppTest.from_file(str(MAIN_APP))
+    at.session_state["authenticated"] = True
+    at.session_state["student_id"] = student_id
+    at.session_state["username"] = "mario_e2e"
+    at.session_state["current_page"] = "exam"
+    at.session_state["current_exam"] = {"id": exam_id, "name": "Algoritmi & strutture"}
+    at.run(timeout=30)
+    assert not at.exception
+    assert len(at.get("file_uploader")) == 1
+
+    at.button(key=f"exam_notes_{exam_id}").click().run(timeout=30)
+    assert not at.exception
+    assert len(at.get("download_button")) == 1
+    assert at.session_state[f"notes_pdf_file_{exam_id}"] == sample_pdf_path.read_bytes()
+
+    at.button(key=f"exam_history_{exam_id}").click().run(timeout=30)
+    assert not at.exception
+    assert at.session_state["current_page"] == "history"
+    assert any(e.label == "Risposte e feedback" for e in at.expander)
+    assert any("Come rappresenti un grafo?" in item.value for item in at.markdown)
+
+
+def test_e2e_empty_history_can_start_first_session():
+    from backend.db.models import Exam, SessionLocal
+
+    student_id = _seed_student()
+    with SessionLocal() as db:
+        exam = Exam(student_id=student_id, name="Esame nuovo")
+        db.add(exam)
+        db.commit()
+        exam_id = exam.id
+
+    at = AppTest.from_file(str(MAIN_APP))
+    at.session_state["authenticated"] = True
+    at.session_state["student_id"] = student_id
+    at.session_state["username"] = "mario_e2e"
+    at.session_state["current_page"] = "history"
+    at.session_state["current_exam"] = {"id": exam_id, "name": "Esame nuovo"}
+    at.run(timeout=30)
+    assert not at.exception
+    _label(at.button, "▶ Avvia prima sessione").click().run(timeout=30)
+    assert not at.exception
+    assert at.session_state["current_page"] == "session"
+    assert at.slider(key="n_questions_slider").value == 5
+
+
+def test_e2e_refresh_restores_login_but_explicit_logout_revokes_cookie(monkeypatch):
+    """A fresh Streamlit session authenticates from the request cookie only."""
+    from streamlit.runtime.context import ContextProxy
+    from backend.session_cookie import COOKIE_NAME, get_or_create_token, verify_token
+
+    student_id = _seed_student("refresh_user")
+    token = get_or_create_token(student_id)
+    monkeypatch.setattr(ContextProxy, "cookies", property(lambda self: {COOKIE_NAME: token}))
+
+    # No session_state carried over: this is the refresh/reconnect boundary.
+    refreshed = AppTest.from_file(str(MAIN_APP)).run(timeout=30)
+    assert not refreshed.exception
+    assert refreshed.session_state["authenticated"] is True
+    assert refreshed.session_state["student_id"] == student_id
+    assert refreshed.session_state["username"] == "refresh_user"
+    assert refreshed.session_state["current_page"] == "upload"
+    assert "token" not in refreshed.query_params
+    assert all(field.key != "login_user" for field in refreshed.text_input)
+
+    _label(refreshed.button, "Esci").click().run(timeout=30)
+    assert not refreshed.exception
+    assert refreshed.session_state["authenticated"] is False
+    assert verify_token(token) is None
+
+    # Even a browser still sending the old cookie cannot restore a logout.
+    after_logout = AppTest.from_file(str(MAIN_APP)).run(timeout=30)
+    assert not after_logout.exception
+    assert after_logout.session_state["authenticated"] is False
+    assert after_logout.session_state["current_page"] == "login"
+
+
+def test_e2e_login_keeps_cookie_writer_mounted_after_rerun():
+    """Regression: previously the login handler unmounted its own writer."""
+    import hashlib
+    from backend.db.models import SessionLocal, Student
+    from backend.session_cookie import get_or_create_token
+
+    student_id = _seed_student("persistent_user")
+    with SessionLocal() as db:
+        student = db.get(Student, student_id)
+        student.password_hash = hashlib.sha256(b"secret123").hexdigest()
+        db.commit()
+
+    at = AppTest.from_file(str(MAIN_APP)).run(timeout=30)
+    at.text_input(key="login_user").set_value("persistent_user")
+    at.text_input(key="login_pwd").set_value("secret123")
+    at.button(key="btn_login").click().run(timeout=30)
+    assert not at.exception
+    assert at.session_state["current_page"] == "upload"
+    components = at.get("bidi_component")
+    assert len(components) == 1
+    assert get_or_create_token(student_id) in str(components[0].proto)

@@ -2,6 +2,9 @@
 pages/upload.py — Gestione esami e upload PDF
 """
 
+from html import escape
+from app.ui import brand, page_heading, empty_state, icon
+
 import logging
 import sys
 from datetime import datetime, timezone
@@ -13,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from backend.agents.ingestor import delete_exam_collection # pylint: disable=wrong-import-position
 from backend.db.models import Exam, Material, SessionLocal, Session as DbSession # pylint: disable=wrong-import-position
-from backend.session_cookie import invalidate_token, render_clear_cookie # pylint: disable=wrong-import-position
+from backend.session_cookie import invalidate_token # pylint: disable=wrong-import-position
 
 logger = logging.getLogger(__name__)
 
@@ -189,31 +192,25 @@ def _close_orphan_sessions(exam_id: int) -> int:
 # ── Navbar ─────────────────────────────────────────────────────────────────
 
 def _navbar():
-    col1, col2, col3 = st.columns([3, 1, 1])
+    col1, col2, col3 = st.columns([4, 1, 1], vertical_alignment="center")
     with col1:
-        st.markdown("""
-        <span style="font-family:'Syne',sans-serif; font-size:1.3rem; font-weight:800;
-              background:linear-gradient(135deg,#6c63ff,#00d4aa);
-              -webkit-background-clip:text; -webkit-text-fill-color:transparent;">
-            🎓 Study Coach
-        </span>
-        """, unsafe_allow_html=True)
+        brand("I tuoi esami")
     with col2:
-        if st.button("📋 Storico", use_container_width=True):
+        if st.button("Storico", icon=":material/history:", use_container_width=True):
             st.session_state.current_page = "history"
             st.session_state.current_exam = None
             st.rerun()
     with col3:
-        if st.button("🚪 Esci", use_container_width=True):
+        if st.button("Esci", icon=":material/logout:", use_container_width=True):
             # Logout esplicito: invalida il token lato DB e cancella il
             # cookie lato browser, così il login persistente termina
             # davvero solo qui, e non per un semplice refresh/disconnessione.
             invalidate_token(st.session_state.get("student_id"))
-            render_clear_cookie()
             for k in list(st.session_state.keys()):
                 del st.session_state[k]
+            st.session_state._clear_session_cookie = True
             st.rerun()
-    st.markdown("<hr style='border-color:#252a36; margin:0.5rem 0 1.5rem'>", unsafe_allow_html=True)
+    st.markdown("<hr style='border-color:var(--border); margin:0.5rem 0 1.5rem'>", unsafe_allow_html=True)
 
 
 # ── Render ─────────────────────────────────────────────────────────────────
@@ -225,24 +222,19 @@ def render():
     student_id = st.session_state.student_id
     username   = st.session_state.username
 
-    st.markdown(f"""
-    <h2 style="font-family:'Syne',sans-serif; margin-bottom:0.2rem;">
-        Ciao, <span style="color:#6c63ff">{username}</span> 👋
-    </h2>
-    <p style="color:#6b7280; margin-bottom:1.5rem;">Gestisci i tuoi esami e avvia una sessione di studio.</p>
-    """, unsafe_allow_html=True)
+    page_heading("I tuoi esami", f"Bentornato, {username}. Riprendi il tuo percorso o prepara un nuovo esame.", "LA TUA LIBRERIA")
 
     # ── CREA NUOVO ESAME ───────────────────────────────────────────────────
     # Inizializza lo stato dell'expander se non esiste
     if "create_exam_expanded" not in st.session_state:
         st.session_state.create_exam_expanded = False
-    
+
     # Pulisci il campo se l'esame è stato appena creato
     if st.session_state.get("just_created_exam", False):
         st.session_state.exam_name_input = ""
         st.session_state.just_created_exam = False
-    
-    with st.expander("➕ Crea nuovo esame", expanded=st.session_state.create_exam_expanded):
+
+    with st.expander("Crea nuovo esame", expanded=st.session_state.create_exam_expanded):
         col_name, col_btn = st.columns([3, 1])
         with col_name:
             exam_name = st.text_input("Nome esame", placeholder="es. Programmazione AI a.a. 2025/26", label_visibility="collapsed", key="exam_name_input")
@@ -264,15 +256,10 @@ def render():
     exams = _get_exams(student_id)
 
     if not exams:
-        st.markdown("""
-        <div style="text-align:center; padding:4rem; color:#4b5563;">
-            <div style="font-size:3rem; margin-bottom:1rem;">📚</div>
-            <p>Nessun esame ancora. Creane uno per iniziare!</p>
-        </div>
-        """, unsafe_allow_html=True)
+        empty_state("Il tuo spazio di studio inizia qui", "Crea un esame dal pannello qui sopra, aggiungi i PDF e inizia a studiare con il tutor.")
         return
 
-    st.markdown(f"<p style='color:#6b7280; font-size:0.9rem;'>{len(exams)} esame/i</p>", unsafe_allow_html=True)
+    st.markdown(f"<p style='color:var(--muted); font-size:0.9rem;'>{len(exams)} esami nella tua libreria</p>", unsafe_allow_html=True)
 
 
     cols_per_row = 3
@@ -282,56 +269,52 @@ def render():
     # Render tiles 3 per riga
     for i in range(0, len(exams), cols_per_row):
         row = exams[i:i + cols_per_row]
-        cols = st.columns(len(row), gap="large")
+        cols = st.columns(cols_per_row, gap="medium")
         for col, exam in zip(cols, row):
             with col:
-                materials = _get_exam_materials(exam.id)
-                n_sources = len(materials) if materials else 0
-                created = exam.created_at.strftime('%d/%m/%Y') if exam.created_at else '—'
+                with st.container(key=f"exam_tile_{exam.id}"):
+                    materials = _get_exam_materials(exam.id)
+                    n_sources = len(materials) if materials else 0
+                    created = exam.created_at.strftime('%d/%m/%Y') if exam.created_at else '—'
 
-                st.markdown(f"""
-                <div class="sc-card" style="min-height:7rem; display:flex; flex-direction:column; justify-content:center;">
-                    <div style="font-family:'Syne',sans-serif; font-weight:700; font-size:1.05rem;">{exam.name}</div>
-                    <div style="color:#6b7280; font-size:0.78rem; margin-top:0.35rem;">{created} · {n_sources} fonti</div>
-                </div>
-                """, unsafe_allow_html=True)
+                    st.html(f'''<div class="sc:flex sc:items-center sc:justify-between sc:gap-3"><span class="sc-mark">{icon()}</span><span class="sc-meta">{n_sources} fonti</span></div><div class="sc-exam-title">{escape(exam.name)}</div><div class="sc-meta">Creato il {created}</div>''')
 
-                # Azioni: Apri | Modifica | Elimina
-                col_a, col_b, col_c = st.columns([1.2, 1, 1])
-                with col_a:
-                    if st.button("Apri", key=f"open_{exam.id}", use_container_width=True):
-                        st.session_state.current_exam = {"id": exam.id, "name": exam.name}
-                        st.session_state.current_page = "exam"
-                        st.rerun()
-                with col_b:
-                    if st.button("Modifica", key=f"edit_{exam.id}", use_container_width=True):
-                        st.session_state[f"editing_exam_{exam.id}"] = True
-                        st.rerun()
-                with col_c:
-                    if st.button("Elimina", key=f"del_{exam.id}_tile", use_container_width=True):
-                        _delete_exam(exam.id, student_id)
-                        st.warning(f"Esame «{exam.name}» eliminato.")
-                        st.rerun()
-
-                # Inline editor per rinominare l'esame
-                if st.session_state.get(f"editing_exam_{exam.id}", False):
-                    new_name = st.text_input("Nuovo nome esame", value=exam.name, key=f"edit_name_{exam.id}")
-                    c1, c2 = st.columns([1, 1])
-                    with c1:
-                        if st.button("Salva", key=f"save_edit_{exam.id}", use_container_width=True):
-                            ok = _rename_exam(exam.id, student_id, new_name)
-                            st.session_state[f"editing_exam_{exam.id}"] = False
-                            if ok:
-                                st.success("Nome esame aggiornato.")
-                            else:
-                                st.error("Impossibile aggiornare il nome esame.")
+                    # Azioni: Apri | Modifica | Elimina
+                    col_a, col_b, col_c = st.columns([1.5, 1, 1])
+                    with col_a:
+                        if st.button("Apri", key=f"open_{exam.id}", use_container_width=True):
+                            st.session_state.current_exam = {"id": exam.id, "name": exam.name}
+                            st.session_state.current_page = "exam"
                             st.rerun()
-                    with c2:
-                        if st.button("Annulla", key=f"cancel_edit_{exam.id}", use_container_width=True):
-                            st.session_state[f"editing_exam_{exam.id}"] = False
+                    with col_b:
+                        if st.button("Modifica", type="tertiary", key=f"edit_{exam.id}", use_container_width=True):
+                            st.session_state[f"editing_exam_{exam.id}"] = True
+                            st.rerun()
+                    with col_c:
+                        if st.button("Elimina", type="tertiary", key=f"del_{exam.id}_tile", use_container_width=True):
+                            _delete_exam(exam.id, student_id)
+                            st.warning(f"Esame «{exam.name}» eliminato.")
                             st.rerun()
 
-                st.markdown("<div style='height:0.5rem'></div>", unsafe_allow_html=True)
+                    # Inline editor per rinominare l'esame
+                    if st.session_state.get(f"editing_exam_{exam.id}", False):
+                        new_name = st.text_input("Nuovo nome esame", value=exam.name, key=f"edit_name_{exam.id}")
+                        c1, c2 = st.columns([1, 1])
+                        with c1:
+                            if st.button("Salva", key=f"save_edit_{exam.id}", use_container_width=True):
+                                ok = _rename_exam(exam.id, student_id, new_name)
+                                st.session_state[f"editing_exam_{exam.id}"] = False
+                                if ok:
+                                    st.success("Nome esame aggiornato.")
+                                else:
+                                    st.error("Impossibile aggiornare il nome esame.")
+                                st.rerun()
+                        with c2:
+                            if st.button("Annulla", key=f"cancel_edit_{exam.id}", use_container_width=True):
+                                st.session_state[f"editing_exam_{exam.id}"] = False
+                                st.rerun()
+
+                    st.markdown("<div style='height:0.5rem'></div>", unsafe_allow_html=True)
 
     st.markdown("<div style='height:0.25rem'></div>", unsafe_allow_html=True)
 
@@ -370,10 +353,10 @@ def _render_notes_panel(exam: Exam, student_id: int):
         return
 
     st.markdown(f"""
-    <div style="background:#0f1319; border:1px solid #252a36; border-radius:10px;
+    <div style="background:var(--surface); border:1px solid var(--border); border-radius:10px;
                 padding:1.25rem 1.5rem; margin:0.5rem 0 1rem;">
-        <div style="font-family:'Syne',sans-serif; font-weight:700; font-size:0.95rem;
-                    color:#00d4aa; margin-bottom:0.75rem;">
+        <div style="font-family:var(--font-ui); font-weight:700; font-size:0.95rem;
+                    color:var(--success); margin-bottom:0.75rem;">
             📋 Appunti sintetici — {exam.name}
         </div>
     </div>

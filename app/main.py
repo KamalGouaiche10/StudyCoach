@@ -15,7 +15,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from backend.db.models import init_db  # pylint: disable=wrong-import-position
 from backend.session_cookie import (  # pylint: disable=wrong-import-position
     render_clear_cookie,
-    render_cookie_autologin_probe,
+    render_set_cookie,
+    get_or_create_token,
+    restore_login_from_cookie,
     verify_token,
 )
 
@@ -25,108 +27,15 @@ init_db()
 # ── Configurazione pagina ──────────────────────────────────────────────────
 st.set_page_config(
     page_title="Study Coach",
-    page_icon="🎓",
+    page_icon=Path(__file__).parent / "assets" / "logo.svg",
     layout="wide",
     initial_sidebar_state="collapsed",
 )
 
 # ── CSS globale ────────────────────────────────────────────────────────────
-st.markdown("""
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=Inter:wght@300;400;500&display=swap');
+from app.ui import load_styles
 
-:root {
-    --bg:        #0d0f14;
-    --surface:   #161923;
-    --border:    #252a36;
-    --accent:    #6c63ff;
-    --accent2:   #00d4aa;
-    --text:      #e8eaf0;
-    --muted:     #6b7280;
-    --danger:    #f43f5e;
-    --warning:   #f59e0b;
-    --success:   #10b981;
-}
-
-html, body, [class*="css"] {
-    font-family: 'Inter', sans-serif;
-    background-color: var(--bg);
-    color: var(--text);
-}
-
-h1, h2, h3, .stMarkdown h1, .stMarkdown h2, .stMarkdown h3 {
-    font-family: 'Syne', sans-serif !important;
-    font-weight: 800;
-}
-
-/* Nascondi sidebar di default */
-[data-testid="stSidebar"] { display: none; }
-
-/* Input fields */
-.stTextInput input, .stTextArea textarea, .stSelectbox select {
-    background: var(--surface) !important;
-    border: 1px solid var(--border) !important;
-    color: var(--text) !important;
-    border-radius: 8px !important;
-}
-
-/* Bottoni primari */
-.stButton > button[kind="primary"] {
-    background: var(--accent) !important;
-    border: none !important;
-    border-radius: 8px !important;
-    font-family: 'Syne', sans-serif !important;
-    font-weight: 700 !important;
-    letter-spacing: 0.03em;
-    transition: all 0.2s ease;
-}
-.stButton > button[kind="primary"]:hover {
-    background: #5a52e0 !important;
-    transform: translateY(-1px);
-    box-shadow: 0 4px 20px rgba(108, 99, 255, 0.35);
-}
-
-/* Bottoni secondari */
-.stButton > button {
-    background: var(--surface) !important;
-    border: 1px solid var(--border) !important;
-    border-radius: 8px !important;
-    color: var(--text) !important;
-    font-family: 'Inter', sans-serif !important;
-}
-
-/* Card generica */
-.sc-card {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    padding: 1.25rem 1.5rem;
-    margin-bottom: 0.75rem;
-}
-
-/* Badge difficoltà */
-.badge {
-    display: inline-block;
-    padding: 2px 10px;
-    border-radius: 999px;
-    font-size: 0.72rem;
-    font-weight: 600;
-    letter-spacing: 0.05em;
-    text-transform: uppercase;
-}
-.badge-base     { background: #1e3a2f; color: var(--success); }
-.badge-inter    { background: #2d2700; color: var(--warning); }
-.badge-avanzata { background: #2d1520; color: var(--danger); }
-
-/* Score colori */
-.score-high { color: var(--success); font-weight: 700; }
-.score-mid  { color: var(--warning); font-weight: 700; }
-.score-low  { color: var(--danger);  font-weight: 700; }
-
-/* Divider */
-.sc-divider { border: none; border-top: 1px solid var(--border); margin: 1.5rem 0; }
-</style>
-""", unsafe_allow_html=True)
+load_styles()
 
 # ── Inizializzazione session_state ────────────────────────────────────────
 defaults = {
@@ -167,10 +76,19 @@ if not st.session_state.authenticated:
             # Token non valido/scaduto lato server: ripulisci anche il
             # cookie lato browser per evitare tentativi di auto-login
             # ripetuti ad ogni futuro caricamento.
-            render_clear_cookie()
-        st.query_params.clear()
+            st.session_state._clear_session_cookie = True
+        del st.query_params["token"]
     else:
-        render_cookie_autologin_probe()
+        restore_login_from_cookie()
+
+# Keep the writer in the final screen: the login handler's immediate rerun
+# must not unmount it before the browser has saved the cookie.
+if st.session_state.authenticated:
+    token = get_or_create_token(st.session_state.student_id)
+    if token:
+        render_set_cookie(token)
+elif st.session_state.get("_clear_session_cookie") or st.context.cookies.get("sc_token"):
+    render_clear_cookie()
 
 # ── Router ────────────────────────────────────────────────────────────────
 page = st.session_state.current_page

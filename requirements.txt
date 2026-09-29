@@ -8,7 +8,7 @@ pypdf
 python-dotenv
 sentence-transformers
 sqlalchemy
-streamlit
+streamlit>=1.57
 uvicorn[standard]
 
 # Test

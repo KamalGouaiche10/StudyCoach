@@ -2,6 +2,9 @@
 pages/history.py — Storico sessioni per esame
 """
 
+from html import escape
+from app.ui import brand, page_heading, empty_state
+
 import json
 import logging
 import sys
@@ -222,10 +225,10 @@ def _format_duration(started_at, ended_at) -> str:
 
 def _score_color(score: float) -> str:
     if score >= 8:
-        return "#10b981"
+        return "var(--success)"
     elif score >= 6:
-        return "#f59e0b"
-    return "#f43f5e"
+        return "var(--warning)"
+    return "var(--danger)"
 
 
 def _verdict_emoji(score: float) -> str:
@@ -241,23 +244,13 @@ def _verdict_emoji(score: float) -> str:
 def _navbar():
     col1, col2 = st.columns([4, 1])
     with col1:
-        st.markdown("""
-        <span style="font-family:'Syne',sans-serif; font-size:1.3rem; font-weight:800;
-              background:linear-gradient(135deg,#6c63ff,#00d4aa);
-              -webkit-background-clip:text; -webkit-text-fill-color:transparent;">
-            🎓 Study Coach
-        </span>
-        <span style="color:#6b7280; margin:0 0.5rem">›</span>
-        <span style="font-family:'Syne',sans-serif; font-size:1.1rem; font-weight:700; color:#e8eaf0;">
-            Storico sessioni
-        </span>
-        """, unsafe_allow_html=True)
+        brand("Storico sessioni")
     with col2:
-        if st.button("← Esami", use_container_width=True):
+        if st.button("Esami", icon=":material/arrow_back:", use_container_width=True):
             st.session_state.current_page = "upload"
             st.session_state.current_exam = None
             st.rerun()
-    st.markdown("<hr style='border-color:#252a36; margin:0.5rem 0 1.5rem'>", unsafe_allow_html=True)
+    st.markdown("<hr style='border-color:var(--border); margin:0.5rem 0 1.5rem'>", unsafe_allow_html=True)
 
 
 # ── Render sessione espansa ────────────────────────────────────────────────
@@ -294,18 +287,18 @@ def _render_session_detail(sess: DbSession):
         diff_css = {"base": "badge-base", "intermedia": "badge-inter", "avanzata": "badge-avanzata"}.get(diff, "badge-inter")
 
         badge_html = f'<span class="badge {diff_css}">{diff}</span>' if diff else ""
-        topic_html = f'<div style="color:#6b7280; font-size:0.78rem;">🏷 {topic}</div>' if topic else ""
-        score_color = _score_color(score) if isinstance(score, (int, float)) else "#6b7280"
+        topic_html = f'<div style="color:var(--muted); font-size:0.78rem;">🏷 {topic}</div>' if topic else ""
+        score_color = _score_color(score) if isinstance(score, (int, float)) else "var(--muted)"
         score_display = f"{score}/10" if isinstance(score, (int, float)) else str(score)
 
         st.markdown(f"""
         <div class="sc-card" style="margin-bottom:0.5rem;">
             <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:0.6rem;">
                 <div style="display:flex; align-items:center; gap:0.5rem;">
-                    <span style="color:#6b7280; font-size:0.8rem; font-weight:600;">Q{i}</span>
+                    <span style="color:var(--muted); font-size:0.8rem; font-weight:600;">Q{i}</span>
                     {badge_html}
                 </div>
-                <span style="font-family:'Syne',sans-serif; font-weight:800; font-size:1.1rem; color:{score_color};">
+                <span style="font-family:var(--font-ui); font-weight:600; font-size:1.1rem; color:{score_color};">
                     {score_display}
                 </span>
             </div>
@@ -335,15 +328,15 @@ def _render_session_detail(sess: DbSession):
                 assessment  = contest.get("contestation_assessment", "")
                 final_score = contest.get("final_score", "")
                 resp        = contest.get("response_to_student", "")
-                color_map   = {"valido": "#10b981", "parzialmente_valido": "#f59e0b", "non_valido": "#f43f5e"}
-                c           = color_map.get(assessment, "#6b7280")
+                color_map   = {"valido": "var(--success)", "parzialmente_valido": "var(--warning)", "non_valido": "var(--danger)"}
+                c           = color_map.get(assessment, "var(--muted)")
                 label       = assessment.replace("_", " ")
                 st.markdown(f"""
-                <div style="padding:0.5rem 0.8rem; background:#1a1a2e; border-radius:8px;
+                <div style="padding:0.5rem 0.8rem; background:var(--surface-raised); border-radius:8px;
                             margin-top:0.5rem; border-left:3px solid {c}; font-size:0.85rem;">
                     ⚖️ <strong>Contestazione {label}</strong>
                     &nbsp;→&nbsp; voto finale: <strong>{final_score}/10</strong><br/>
-                    <span style="color:#9ca3af">{resp}</span>
+                    <span style="color:var(--muted)">{resp}</span>
                 </div>
                 """, unsafe_allow_html=True)
 
@@ -353,18 +346,14 @@ def _render_session_detail(sess: DbSession):
 def render():
     _require_auth()
     _navbar()
+    page_heading("Il tuo percorso", "Rivedi le sessioni, ritrova i tuoi appunti e osserva i progressi.")
 
     student_id   = st.session_state.student_id
     current_exam = st.session_state.get("current_exam")
     exams        = _get_all_exams(student_id)
 
     if not exams:
-        st.markdown("""
-        <div style="text-align:center; padding:4rem; color:#4b5563;">
-            <div style="font-size:3rem; margin-bottom:1rem;">📭</div>
-            <p>Nessun esame trovato. Creane uno dalla pagina principale.</p>
-        </div>
-        """, unsafe_allow_html=True)
+        empty_state("Non ci sono ancora sessioni", "Crea un esame dalla libreria e avvia la tua prima sessione di studio.", "history")
         return
 
     # Usa oggetti Exam direttamente e mostra solo il nome (senza id)
@@ -386,18 +375,13 @@ def render():
 
     st.markdown(f"""
     <div style="display:flex; align-items:center; gap:1rem; margin:1rem 0 0.75rem;">
-        <h3 style="font-family:'Syne',sans-serif; margin:0;">{selected_exam.name}</h3>
-        <span style="color:#6b7280; font-size:0.85rem;">{len(sessions)} sessioni</span>
+        <h3 style="font-family:var(--font-ui); margin:0;">{escape(selected_exam.name)}</h3>
+        <span style="color:var(--muted); font-size:0.85rem;">{len(sessions)} sessioni</span>
     </div>
     """, unsafe_allow_html=True)
 
     if not sessions:
-        st.markdown("""
-        <div style="text-align:center; padding:3rem; color:#4b5563;">
-            <div style="font-size:2.5rem; margin-bottom:0.75rem;">📂</div>
-            <p>Nessuna sessione ancora per questo esame.</p>
-        </div>
-        """, unsafe_allow_html=True)
+        empty_state("Ogni percorso ha una prima sessione", "Studia con il tutor: qui ritroverai risposte, feedback e report.", "history")
         col_start, _ = st.columns([1, 3])
         with col_start:
             if st.button("▶ Avvia prima sessione", type="primary", use_container_width=True):
@@ -411,19 +395,19 @@ def render():
         best    = max(s.score_total for s in completed)
         col1, col2, col3, col4 = st.columns(4)
         metrics = [
-            ("Sessioni totali", len(sessions),   "#6b7280"),
-            ("Completate",      len(completed),  "#6c63ff"),
+            ("Sessioni totali", len(sessions),   "var(--muted)"),
+            ("Completate",      len(completed),  "var(--accent)"),
             ("Media generale",  f"{avg_all}/10", _score_color(avg_all)),
             ("Miglior voto",    f"{best}/10",    _score_color(best)),
         ]
         for col, (label, value, color) in zip([col1, col2, col3, col4], metrics):
             with col:
                 st.markdown(f"""
-                <div class="sc-card" style="text-align:center; padding:1rem;">
-                    <div style="font-size:1.5rem; font-weight:800; font-family:'Syne',sans-serif; color:{color};">
+                <div class="sc-stat">
+                    <div class="sc-stat-value">
                         {value}
                     </div>
-                    <div style="font-size:0.78rem; color:#6b7280; margin-top:0.2rem;">{label}</div>
+                    <div style="font-size:0.78rem; color:var(--muted); margin-top:0.2rem;">{label}</div>
                 </div>
                 """, unsafe_allow_html=True)
         st.markdown("<div style='height:0.5rem'></div>", unsafe_allow_html=True)
@@ -445,14 +429,14 @@ def render():
             #  : sessione orfana — non completata, nessun voto
             verdict_icon  = "⏳"
             score_str     = "Non completata"
-            score_color   = "#6b7280"
-            border_color  = "#252a36"
+            score_color   = "var(--muted)"
+            border_color  = "var(--border)"
         else:
             # Sessione chiusa (ended_at presente) ma senza score (edge case)
             verdict_icon  = " "
             score_str     = "Senza voto"
-            score_color   = "#6b7280"
-            border_color  = "#252a36"
+            score_color   = "var(--muted)"
+            border_color  = "var(--border)"
 
         has_report = bool(sess.report_path and Path(sess.report_path).exists())
 
@@ -460,37 +444,25 @@ def render():
         <div class="sc-card" style="border-left:3px solid {border_color}; margin-bottom:0.25rem;">
             <div style="display:flex; justify-content:space-between; align-items:center;">
                 <div>
-                    <div style="font-size:0.78rem; color:#6b7280; margin-bottom:0.3rem;">
+                    <div style="font-size:0.78rem; color:var(--muted); margin-bottom:0.3rem;">
                         {verdict_icon} Sessione #{sess.id} &nbsp;·&nbsp; {date_str} &nbsp;·&nbsp; {duration}
                     </div>
-                    <div style="font-family:'Syne',sans-serif; font-size:1.4rem; font-weight:800;
+                    <div style="font-family:var(--font-ui); font-size:1.4rem; font-weight:600;
                                 color:{score_color};">
                         {score_str}
                     </div>
                 </div>
-                {"<div style='font-size:0.82rem; color:#6b7280;'>📄 Report disponibile</div>" if has_report else "<div></div>"}
+                {"<div style='font-size:0.82rem; color:var(--muted);'>📄 Report disponibile</div>" if has_report else "<div></div>"}
             </div>
         </div>
         """, unsafe_allow_html=True)
 
         # ── Bottoni ───────────────────────────────────────────────────────
-        col_detail, col_notes, col_pdf, col_close, col_del = st.columns([2, 1.2, 1.2, 1.5, 1])
-
-        with col_detail:
-            if sess.qa_log:
-                with st.expander("📜 Dettaglio Q&A", expanded=False):
-                    _render_session_detail(sess)
-            elif orphan and not sess.qa_log:
-                #  : mostra il messaggio solo se veramente orfana E senza Q&A
-                st.markdown(
-                    "<p style='color:#6b7280; font-size:0.82rem; margin:0.4rem 0;'>"
-                    "Sessione non completata — nessun Q&A registrato.</p>",
-                    unsafe_allow_html=True,
-                )
+        col_notes, col_pdf, col_close, col_del = st.columns(4)
 
         with col_notes:
             if sess.qa_log:
-                if st.button("📋 Appunti", key=f"notes_{sess.id}", use_container_width=True,
+                if st.button("Appunti", icon=":material/description:", key=f"notes_{sess.id}", use_container_width=True,
                              help="Visualizza gli appunti sintetici generati per questa sessione"):
                     st.session_state[f"show_notes_{sess.id}"] = not st.session_state.get(f"show_notes_{sess.id}", False)
                     st.rerun()
@@ -501,7 +473,8 @@ def render():
                     # Leggiamo i bytes per soddisfare i type hints di Streamlit
                     data = f.read()
                     st.download_button(
-                        "📥 Report PDF",
+                        "Report PDF",
+                        icon=":material/download:",
                         data=data,
                         file_name=f"report_sessione_{sess.id}.pdf",
                         mime="application/pdf",
@@ -539,6 +512,18 @@ def render():
                     _delete_session(sess.id)
                     st.rerun()
 
+        if sess.qa_log:
+            with st.expander("Risposte e feedback", expanded=False):
+                _render_session_detail(sess)
+        elif orphan and not sess.qa_log:
+            #  : mostra il messaggio solo se veramente orfana E senza Q&A
+            st.markdown(
+                "<p style='color:var(--muted); font-size:0.82rem; margin:0.4rem 0;'>"
+                "Sessione non completata — nessun Q&A registrato.</p>",
+                unsafe_allow_html=True,
+            )
+
+
         # ── Pannello appunti sintetici ─────────────────────────────────────
         if st.session_state.get(f"show_notes_{sess.id}", False):
             _render_notes_panel(sess)
@@ -546,7 +531,7 @@ def render():
         st.markdown("<div style='height:0.1rem'></div>", unsafe_allow_html=True)
 
     # ── Bottone nuova sessione ─────────────────────────────────────────────
-    st.markdown("<hr style='border-color:#252a36; margin:1.5rem 0 1rem'>", unsafe_allow_html=True)
+    st.markdown("<hr style='border-color:var(--border); margin:1.5rem 0 1rem'>", unsafe_allow_html=True)
     col_btn, _ = st.columns([1, 3])
     with col_btn:
         if st.button("▶ Nuova sessione", type="primary", use_container_width=True):
@@ -583,10 +568,10 @@ def _render_notes_panel(sess: DbSession):
         return
 
     st.markdown(f"""
-    <div style="background:#0f1319; border:1px solid #252a36; border-radius:10px;
+    <div style="background:var(--surface); border:1px solid var(--border); border-radius:10px;
                 padding:1.25rem 1.5rem 0.5rem; margin:0.5rem 0 0.25rem;">
-        <div style="font-family:'Syne',sans-serif; font-weight:700; font-size:0.95rem;
-                    color:#6c63ff; margin-bottom:0.5rem;">
+        <div style="font-family:var(--font-ui); font-weight:700; font-size:0.95rem;
+                    color:var(--accent); margin-bottom:0.5rem;">
             📋 Appunti sintetici — Sessione #{sess.id}
         </div>
     </div>
