@@ -1,0 +1,16 @@
+# Runtime
+agno
+chromadb
+fastapi
+fpdf2
+numpy
+pypdf
+python-dotenv
+sentence-transformers
+sqlalchemy
+streamlit
+uvicorn[standard]
+
+# Test
+pytest
+httpx
