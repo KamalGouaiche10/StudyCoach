@@ -22,7 +22,7 @@ uv sync
 In alternativa, con pip in un virtualenv attivo:
 
 ```bash
-  # se presente
+pip install -r requirements.txt  
 ```
 
 ## 3. Avvia l'app
