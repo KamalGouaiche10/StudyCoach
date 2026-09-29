@@ -242,7 +242,8 @@ def test_summary_missing_is_repaired_without_regenerating_full_notes(monkeypatch
 
     agent = FakeAgent()
     notes = ng._run_with_retry(agent, "PROMPT ORIGINALE CON CONTESTO")
-    assert notes.startswith(first)
+    # _run_with_retry strips the model response before preserving the notes.
+    assert notes.startswith(first.strip())
     assert "## Riepilogo" in notes
     assert len(agent.calls) == 2
     assert "PROMPT ORIGINALE CON CONTESTO" not in agent.calls[1]

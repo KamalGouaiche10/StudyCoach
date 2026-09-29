@@ -70,8 +70,8 @@ def render_set_cookie(token: str) -> None:
             document.cookie = "{COOKIE_NAME}={token}; Max-Age={COOKIE_MAX_AGE}; Path=/; SameSite=Lax";
         </script>
         """,
-        height=0,
-        width=0,
+        height=1,
+        width=1,
     )
 
 """Cancella il cookie di sessione (da chiamare al logout esplicito)."""
@@ -83,8 +83,8 @@ def render_clear_cookie() -> None:
             document.cookie = "{COOKIE_NAME}=; Max-Age=0; Path=/; SameSite=Lax";
         </script>
         """,
-        height=0,
-        width=0,
+        height=1,
+        width=1,
     )
 
 
@@ -104,6 +104,6 @@ def render_cookie_autologin_probe() -> None:
             }})();
         </script>
         """,
-        height=0,
-        width=0,
+        height=1,
+        width=1,
     )
