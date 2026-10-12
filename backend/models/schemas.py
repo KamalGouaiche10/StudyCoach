@@ -7,7 +7,9 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Optional
-from pydantic import BaseModel, Field, field_validator
+from enum import Enum
+from pydantic import BaseModel, Field, field_validator, model_validator
+import re
 
 
 # ===========================================================================
@@ -16,12 +18,28 @@ from pydantic import BaseModel, Field, field_validator
 
 class RegisterRequest(BaseModel):
     username: str = Field(..., min_length=3, max_length=50, examples=["mario_rossi"])
+    email: str = Field(..., max_length=320, examples=["mario@example.com"])
     password: str = Field(..., min_length=6, examples=["secret123"])
+    password_confirm: str = Field(..., min_length=6, exclude=True)
 
     @field_validator("username")
     @classmethod
     def username_strip(cls, v: str) -> str:
         return v.strip()
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, value: str) -> str:
+        email = value.strip().casefold()
+        if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+            raise ValueError("Inserisci un indirizzo email valido.")
+        return email
+
+    @model_validator(mode="after")
+    def passwords_match(self):
+        if self.password != self.password_confirm:
+            raise ValueError("Le password non coincidono.")
+        return self
 
 
 class LoginRequest(BaseModel):
@@ -83,13 +101,20 @@ class QuizGenerateRequest(BaseModel):
     )
     n_questions: int = Field(default=5, ge=1, le=20)
     source_name: str = Field(default="materiale di studio", examples=["Slide Lezione 3"])
+    material_ids: Optional[list[int]] = Field(default=None, description="ID delle fonti da usare")
+
+
+class Difficulty(str, Enum):
+    base = "base"
+    intermedia = "intermedia"
+    avanzata = "avanzata"
 
 
 class QuestionOut(BaseModel):
     id: int
     text: str
-    difficulty: str  # "base" | "intermedia" | "avanzata"
-    topic_hint: str
+    difficulty: Difficulty
+    topic_hint: str = Field(..., max_length=200)
 
 
 class QuizGenerateResponse(BaseModel):
@@ -108,6 +133,7 @@ class QuizGenerateResponse(BaseModel):
 class SessionCreate(BaseModel):
     """Apre una nuova sessione per un esame."""
     exam_id: int
+    material_ids: Optional[list[int]] = None
 
 
 class SessionResponse(BaseModel):
@@ -117,6 +143,10 @@ class SessionResponse(BaseModel):
     ended_at: Optional[datetime] = None
     score_total: Optional[float] = None
     report_path: Optional[str] = None
+    report_available: bool = False
+    has_attempts: bool = False
+    has_quiz: bool = False
+    status: str = "in_corso"
 
     model_config = {"from_attributes": True}
 
@@ -146,7 +176,7 @@ class TutorStartResponse(BaseModel):
 class Answer1Request(BaseModel):
     session_id: int
     question_id: int
-    answer: str = Field(..., min_length=1)
+    answer: str = Field(..., min_length=1, max_length=10000)
 
 
 class Answer1Response(BaseModel):
@@ -159,7 +189,7 @@ class Answer1Response(BaseModel):
 class Answer2Request(BaseModel):
     session_id: int
     question_id: int
-    answer: str = Field(..., min_length=1)
+    answer: str = Field(..., min_length=1, max_length=10000)
 
 
 class Answer2Response(BaseModel):
@@ -168,13 +198,14 @@ class Answer2Response(BaseModel):
     correct_points: list[str]
     missing_points: list[str]
     improvement_after_guidance: str
+    reliable: bool = True
     can_contest: bool = True
 
 
 class ContestRequest(BaseModel):
     session_id: int
     question_id: int
-    argumentation: str = Field(..., min_length=10)
+    argumentation: str = Field(..., min_length=10, max_length=5000)
 
 
 class ContestResponse(BaseModel):

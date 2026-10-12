@@ -14,12 +14,13 @@ GROQ_MODEL = os.getenv("GROQ_MODEL", DEFAULT_GROQ_MODEL).strip() or DEFAULT_GROQ
 def safe_groq_error(error: Exception) -> str:
     """Restituisce un errore utile per i log senza esporre credenziali."""
     message = str(error)
-    api_key = os.getenv("GROQ_API_KEY")
-    if api_key:
-        message = message.replace(api_key, "[REDACTED]")
+    for key_name in ("GROQ_API_KEY", "MISTRAL_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY"):
+        api_key = os.getenv(key_name)
+        if api_key:
+            message = message.replace(api_key, "[REDACTED]")
     message = re.sub(r"(?i)(bearer\s+)[A-Za-z0-9._-]+", r"\1[REDACTED]", message)
     message = re.sub(
-        r"(?i)(groq[_ -]?api[_ -]?key\s*[=:]\s*)[^\s,;]+",
+        r"(?i)((?:groq|mistral|google|gemini)[_ -]?api[_ -]?key\s*[=:]\s*)[^\s,;]+",
         r"\1[REDACTED]",
         message,
     )

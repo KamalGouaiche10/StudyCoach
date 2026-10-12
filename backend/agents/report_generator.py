@@ -3,33 +3,10 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
-import unicodedata
-
 from fpdf import FPDF
+from backend.agents.pdf_utils import pdf_text, register_unicode_fonts
 
 REPORTS_DIR = Path(__file__).parent.parent.parent / "reports"
-
-def _pdf_safe_text(value: object) -> str:
-    """Converte testo in latin-1 sostituendo caratteri non supportati da FPDF core fonts."""
-    text = str(value)
-    text = unicodedata.normalize("NFKD", text)
-    replacements = {
-        "’": "'", "‘": "'", "“": '"', "”": '"',
-        "–": "-", "—": "-", "…": "...", "•": "-",
-        "→": "->", "←": "<-", "✓": "OK", "✅": "OK",
-        "⚠": "!", "📘": "", "📄": "", "€": "Euro",
-    }
-    for src, dst in replacements.items():
-        text = text.replace(src, dst)
-    # Mantieni solo caratteri stampabili latin-1 (incluso accenti)
-    return "".join(ch for ch in text if ch == "\n" or ch == "\t" or (ord(ch) >= 32 and ord(ch) <= 255))
-
-# Crea la cartella reports. Nessun fallback: se la cartella non può essere
-# creata o non è scrivibile, l'errore si propaga esplicitamente all'avvio.
-REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-test_file = REPORTS_DIR / ".write_test"
-test_file.write_text("test")
-test_file.unlink()
 
 
 # ---------------------------------------------------------------------------
@@ -59,8 +36,8 @@ def generate_markdown(report: dict,session_id: int,exam_name: str = "Esame",) ->
         f"",f"| Argomento | Media | Tentativi | Stato |",f"|---|---|---|---|",]
 
     for t in breakdown:
-        stato = "  Da rivedere" if t["is_weak"] else "✅ Padroneggiato"
-        lines.append(  f"| {t['topic']} | {t['avg_score']}/10 | {t['n_attempts']} | {stato} |")
+        stato = "❌ Da rivedere" if t["is_weak"] else "✅ Padroneggiato"
+        lines.append(f"| {t['topic']} | {t['avg_score']}/10 | {t['n_attempts']} | {stato} |")
 
     lines += [ f"", f"---", f"", f"## Aree da Rivedere", f"",]
     if weak:
@@ -86,8 +63,12 @@ def generate_markdown(report: dict,session_id: int,exam_name: str = "Esame",) ->
 class _ReportPDF(FPDF):
     """Sottoclasse FPDF con header e footer personalizzati."""
 
+    def __init__(self):
+        super().__init__()
+        register_unicode_fonts(self)
+
     def header(self) -> None:
-        self.set_font("Helvetica", "B", 10)
+        self.set_font("Arial", "B", 10)
         self.set_text_color(80, 80, 80)
         self.cell(0, 8, "Study Coach - Report Sessione")
         self.ln(4)
@@ -97,16 +78,16 @@ class _ReportPDF(FPDF):
 
     def footer(self) -> None:
         self.set_y(-15)
-        self.set_font("Helvetica", "I", 8)
+        self.set_font("Arial", "I", 8)
         self.set_text_color(150, 150, 150)
         self.cell(0, 10, f"Pagina {self.page_no()}", align="C")
 
 
 def _add_section_title(pdf: FPDF, title: str) -> None:
-    pdf.set_font("Helvetica", "B", 13)
+    pdf.set_font("Arial", "B", 13)
     pdf.set_text_color(40, 40, 40)
     pdf.ln(4)
-    pdf.cell(0, 8, _pdf_safe_text(title))
+    pdf.cell(0, 8, pdf_text(title))
     pdf.ln(8)
     pdf.set_draw_color(180, 180, 180)
     pdf.line(10, pdf.get_y(), 200, pdf.get_y())
@@ -114,9 +95,9 @@ def _add_section_title(pdf: FPDF, title: str) -> None:
 
 
 def _add_body(pdf: FPDF, text: str) -> None:
-    pdf.set_font("Helvetica", "", 11)
+    pdf.set_font("Arial", "", 11)
     pdf.set_text_color(60, 60, 60)
-    pdf.multi_cell(0, 6, _pdf_safe_text(text))
+    pdf.multi_cell(0, 6, pdf_text(text))
     pdf.ln(2)
 
 
@@ -141,13 +122,13 @@ def generate_pdf( report: dict, session_id: int, exam_name: str = "Esame",) -> b
     pdf.add_page()
 
     # Titolo
-    pdf.set_font("Helvetica", "B", 18)
+    pdf.set_font("Arial", "B", 18)
     pdf.set_text_color(30, 30, 30)
-    pdf.cell(0, 12, _pdf_safe_text(f"Report Sessione - {exam_name}"))
+    pdf.cell(0, 12, pdf_text(f"Report Sessione - {exam_name}"))
     pdf.ln(12)
-    pdf.set_font("Helvetica", "", 10)
+    pdf.set_font("Arial", "", 10)
     pdf.set_text_color(120, 120, 120)
-    pdf.cell(0, 6, _pdf_safe_text(f"Generato il {now} | Sessione #{session_id}"))
+    pdf.cell(0, 6, pdf_text(f"Generato il {now} | Sessione #{session_id}"))
     pdf.ln(10)
 
     # Risultato complessivo
@@ -158,19 +139,19 @@ def generate_pdf( report: dict, session_id: int, exam_name: str = "Esame",) -> b
         pdf.set_text_color(200, 140, 0)
     else:
         pdf.set_text_color(200, 0, 0)
-    pdf.set_font("Helvetica", "B", 28)
+    pdf.set_font("Arial", "B", 28)
     pdf.cell(0, 14, f"{avg}/10")
     pdf.ln(14)
     pdf.set_text_color(60, 60, 60)
-    pdf.set_font("Helvetica", "", 11)
-    pdf.cell(0, 6, _pdf_safe_text(f"Verdetto: {verdict}"))
+    pdf.set_font("Arial", "", 11)
+    pdf.cell(0, 6, pdf_text(f"Verdetto: {verdict}"))
     pdf.ln(6)
-    pdf.cell(0, 6, _pdf_safe_text(f"Domande completate: {n_q}"))
+    pdf.cell(0, 6, pdf_text(f"Domande completate: {n_q}"))
     pdf.ln(10)
 
     # Tabella topic
     _add_section_title(pdf, "Performance per Argomento")
-    pdf.set_font("Helvetica", "B", 10)
+    pdf.set_font("Arial", "B", 10)
     pdf.set_fill_color(240, 240, 240)
     pdf.set_text_color(40, 40, 40)
     pdf.cell(90, 7, "Argomento", border=1, fill=True)
@@ -179,17 +160,17 @@ def generate_pdf( report: dict, session_id: int, exam_name: str = "Esame",) -> b
     pdf.cell(40, 7, "Stato", border=1, fill=True, align="C")
     pdf.ln()
 
-    pdf.set_font("Helvetica", "", 10)
+    pdf.set_font("Arial", "", 10)
     for t in breakdown:
         stato = "Da rivedere" if t["is_weak"] else "Padroneggiato"
         if t["is_weak"]:
             pdf.set_text_color(180, 0, 0)
         else:
             pdf.set_text_color(0, 130, 0)
-        pdf.cell(90, 6, _pdf_safe_text(str(t["topic"])[:45]), border=1)
+        pdf.cell(90, 6, pdf_text(str(t["topic"])[:45]), border=1)
         pdf.cell(25, 6, f"{t['avg_score']}/10", border=1, align="C")
         pdf.cell(25, 6, str(t["n_attempts"]), border=1, align="C")
-        pdf.cell(40, 6, _pdf_safe_text(stato), border=1, align="C")
+        pdf.cell(40, 6, pdf_text(stato), border=1, align="C")
         pdf.ln()
 
     pdf.set_text_color(60, 60, 60)
@@ -241,11 +222,70 @@ def save_report(report: dict,session_id: int,exam_name: str = "Esame",) -> dict[
     pdf_path = REPORTS_DIR / f"{base_name}.pdf"
 
     md_content = generate_markdown(report, session_id, exam_name)
-    md_path.write_text(md_content, encoding="utf-8")
-    print(f"[ReportGenerator] ✅ Salvato Markdown: {md_path}")
-
     pdf_bytes = generate_pdf(report, session_id, exam_name)
-    pdf_path.write_bytes(pdf_bytes)
-    print(f"[ReportGenerator] ✅ Salvato PDF: {pdf_path}")
+    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Prepare both artifacts before replacing either published file. Restore
+    # existing reports if the second replacement fails.
+    import os
+    import tempfile
+
+    staged = []
+    previous = {md_path: md_path.read_bytes() if md_path.exists() else None,
+                pdf_path: pdf_path.read_bytes() if pdf_path.exists() else None}
+    try:
+        for target, content in ((md_path, md_content.encode("utf-8")), (pdf_path, pdf_bytes)):
+            with tempfile.NamedTemporaryFile(dir=REPORTS_DIR, prefix=f".{base_name}.", delete=False) as temp:
+                staged.append(Path(temp.name))
+                temp.write(content)
+        replaced = []
+        try:
+            for source, target in zip(staged, (md_path, pdf_path)):
+                os.replace(source, target)
+                replaced.append(target)
+        except Exception:
+            for target in reversed(replaced):
+                old_content = previous[target]
+                if old_content is None:
+                    target.unlink(missing_ok=True)
+                else:
+                    target.write_bytes(old_content)
+            raise
+    finally:
+        for source in staged:
+            source.unlink(missing_ok=True)
 
     return {"md": str(md_path), "pdf": str(pdf_path)}
+
+
+def report_snapshot(student_id: int, exam_id: int, session_id: int) -> dict[Path, bytes | None]:
+    """Capture existing artifacts so a failed database commit can undo a save."""
+    stem = f"{int(student_id)}_{int(exam_id)}_{int(session_id)}"
+    paths = (REPORTS_DIR / f"{stem}.md", REPORTS_DIR / f"{stem}.pdf")
+    return {path: path.read_bytes() if path.exists() else None for path in paths}
+
+
+def restore_report_snapshot(snapshot: dict[Path, bytes | None]) -> None:
+    for path, content in snapshot.items():
+        if content is None:
+            path.unlink(missing_ok=True)
+        else:
+            path.write_bytes(content)
+
+
+def delete_session_reports(student_id: int, exam_id: int, session_id: int) -> None:
+    """Remove only the two files belonging to this session."""
+    stem = f"{int(student_id)}_{int(exam_id)}_{int(session_id)}"
+    for extension in ("md", "pdf"):
+        (REPORTS_DIR / f"{stem}.{extension}").unlink(missing_ok=True)
+
+
+def delete_exam_reports(student_id: int, exam_id: int) -> None:
+    """Remove report artifacts for sessions cascaded with an exam."""
+    prefix = f"{int(student_id)}_{int(exam_id)}_"
+    for path in REPORTS_DIR.glob(f"{prefix}*.md"):
+        if path.stem.removeprefix(prefix).isdigit():
+            path.unlink()
+    for path in REPORTS_DIR.glob(f"{prefix}*.pdf"):
+        if path.stem.removeprefix(prefix).isdigit():
+            path.unlink()

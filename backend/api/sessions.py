@@ -1,13 +1,20 @@
 
 import json
+from dataclasses import asdict
 from datetime import datetime, timezone
+from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from backend.agents.adaptive_engine import AdaptiveEngine
-from backend.agents.quiz_generator import generate_quiz
-from backend.agents.report_generator import save_report
-from backend.agents.socratic_tutor import SocraticTutor
+from backend.api.authorization import require_api_owner
+from backend.error_messages import public_error
+from backend.agents.quiz_generator import UnverifiableQuizError, generate_quiz
+from backend.agents.llm_errors import is_rate_limit_error
+from backend.agents.ingestor import verify_exam_material
+from backend.agents.ingestor import search_passages
+from backend.agents.report_generator import save_report, report_snapshot, restore_report_snapshot
+from backend.agents.socratic_tutor import SocraticTutor, QuestionAttempt, TurnState, EvaluationResult, ContestationResult
 from backend.db.models import Session as DbSession
 from backend.db.models import SessionLocal
 from backend.models.schemas import (
@@ -34,15 +41,72 @@ from backend.models.schemas import (
     TutorStartResponse,
 )
 
-router = APIRouter(prefix="/sessions", tags=["sessions"])
+router = APIRouter(prefix="/sessions", tags=["sessions"], dependencies=[Depends(require_api_owner)])
 
 # ---------------------------------------------------------------------------
 # In-memory store per tutor e adaptive engine attivi
 
 # ---------------------------------------------------------------------------
 
-_active_tutors:  dict[str, SocraticTutor]  = {}   # key: f"{session_id}_{question_id}"
-_active_engines: dict[int, AdaptiveEngine] = {}   # key: session_id
+def _engine_from_session(sess: DbSession) -> AdaptiveEngine:
+    engine = AdaptiveEngine(student_id=sess.student_id or 0, exam_id=sess.exam_id)
+    for attempt in json.loads(sess.qa_log or "[]"):
+        evaluation = attempt.get("evaluation") or {}
+        contestation = attempt.get("contestation_result") or {}
+        if attempt.get("reliable") is False or evaluation.get("reliable") is False:
+            continue
+        score = (
+            contestation.get("final_score", evaluation.get("score"))
+            if contestation.get("reliable", True) else evaluation.get("score")
+        )
+        if score is not None:
+            engine.record_answer(attempt["question_id"], attempt.get("topic_hint", ""), score)
+    return engine
+
+
+def _tutor_from_session(sess: DbSession, question_id: int, student_id: int) -> SocraticTutor | None:
+    if not sess.current_turn_json:
+        return None
+    data = json.loads(sess.current_turn_json)
+    if int(data.get("question_id", -1)) != question_id:
+        return None
+    material_ids = (json.loads(sess.quiz_json or "{}")).get("material_ids")
+    tutor = SocraticTutor(student_id=student_id, exam_id=sess.exam_id, material_ids=material_ids)
+    evaluation = data.get("evaluation")
+    tutor.attempt = QuestionAttempt(
+        question_id=data["question_id"], question_text=data["question_text"],
+        difficulty=data.get("difficulty", "intermedia"), topic_hint=data.get("topic_hint", ""),
+        student_answer_1=data.get("student_answer_1", ""), guiding_question=data.get("guiding_question", ""),
+        positive_feedback=data.get("positive_feedback", ""), focus_area=data.get("focus_area", ""),
+        student_answer_2=data.get("student_answer_2", ""), state=TurnState[data.get("state", "WAITING_ANSWER_1")],
+    )
+    if evaluation:
+        tutor.attempt.evaluation = EvaluationResult(
+            score=evaluation.get("score", 0), motivation=evaluation.get("motivation", ""),
+            correct_points=evaluation.get("correct_points", []), missing_points=evaluation.get("missing_points", []),
+            improvement_after_guidance=evaluation.get("improvement_after_guidance", ""),
+            reliable=evaluation.get("reliable", True),
+        )
+    contestation = data.get("contestation_result")
+    if contestation:
+        tutor.attempt.contestation_result = ContestationResult(**contestation)
+    tutor._source_cache = search_passages(
+        data["question_text"], student_id, sess.exam_id, n_results=5,
+        material_ids=material_ids,
+    )
+    tutor._context_cache = [passage["text"] for passage in tutor._source_cache]
+    return tutor
+
+
+def _persist_turn(session_id: int, tutor: SocraticTutor) -> None:
+    db = SessionLocal()
+    try:
+        sess = db.query(DbSession).filter(DbSession.id == session_id).first()
+        if sess:
+            sess.current_turn_json = tutor.to_json()
+            db.commit()
+    finally:
+        db.close()
 
 
 # ---------------------------------------------------------------------------
@@ -71,6 +135,10 @@ def _session_to_response(sess: DbSession) -> SessionResponse:
         ended_at=sess.ended_at,
         score_total=sess.score_total,
         report_path=sess.report_path,
+        report_available=bool(sess.report_path and Path(sess.report_path).is_file()),
+        has_attempts=bool(sess.qa_log and sess.qa_log.strip() not in {"", "[]"}),
+        has_quiz=bool(sess.quiz_json),
+        status=sess.status,
     )
 
 
@@ -89,24 +157,26 @@ def create_session(
     student_id: int = Query(..., description="ID dello studente"),
 ) -> SessionResponse:
     """Crea una DbSession e inizializza l'AdaptiveEngine in memoria."""
+    material_check = verify_exam_material(student_id, payload.exam_id, material_ids=payload.material_ids)
+    if not material_check["ok"]:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"message": "Materiali dell'esame incoerenti", "errors": material_check["errors"]},
+        )
     db = SessionLocal()
     try:
-        sess = DbSession(exam_id=payload.exam_id)
+        sess = DbSession(exam_id=payload.exam_id, student_id=student_id, status="in_corso")
         db.add(sess)
         db.commit()
         db.refresh(sess)
 
         # Inizializza AdaptiveEngine per questa sessione
-        _active_engines[sess.id] = AdaptiveEngine(
-            student_id=student_id,
-            exam_id=payload.exam_id,
-        )
         return _session_to_response(sess)
     except Exception as exc: # pylint: disable=broad-exception-caught
         db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Errore creazione sessione: {exc}",
+            detail="Impossibile creare la sessione. Riprova.",
         ) from exc
     finally:
         db.close()
@@ -127,10 +197,18 @@ def generate_session_quiz(
     student_id: int = Query(..., description="ID dello studente"),
 ) -> QuizGenerateResponse:
     """
-    Usa QuizGenerator (RAG + Gemini) per produrre N domande
+    Usa QuizGenerator (RAG + Groq) per produrre N domande
     calibrate sul materiale indicizzato.
     """
-    sess = _get_session_or_404(session_id)
+    sess = _require_session_owner(session_id, student_id)
+    material_check = verify_exam_material(
+        student_id, sess.exam_id, material_ids=payload.material_ids,
+    )
+    if not material_check["ok"]:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"message": "Materiali dell'esame incoerenti", "errors": material_check["errors"]},
+        )
 
     try:
         result = generate_quiz(
@@ -139,17 +217,51 @@ def generate_session_quiz(
             topic_query=payload.topic_query,
             n_questions=payload.n_questions,
             source_name=payload.source_name,
+            material_ids=payload.material_ids,
         )
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=str(exc),
-        ) from exc
-    except Exception as exc: # pylint: disable=broad-exception-caught
+    except Exception as exc:
+        if is_rate_limit_error(exc):
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=public_error(exc, "Limite di richieste Groq raggiunto. Riprova più tardi."),
+            ) from exc
+        if isinstance(exc, UnverifiableQuizError):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="Il modello non ha prodotto domande con citazioni verificabili. Riprova con queste fonti o selezionane altre.",
+            ) from exc
+        if isinstance(exc, ValueError):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Impossibile generare le domande con le fonti selezionate.",
+            ) from exc
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Errore generazione quiz: {exc}",
+            detail=public_error(exc, "Impossibile generare le domande. Riprova."),
         ) from exc
+
+    if result.n_questions != payload.n_questions or len(result.questions) != payload.n_questions:
+        produced = len(result.questions)
+        label = "domanda verificabile" if produced == 1 else "domande verificabili"
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=(f"Sono state generate solo {produced} {label} "
+                    f"su {payload.n_questions} richieste. Riprova con queste fonti o selezionane altre."),
+        )
+
+
+    db = SessionLocal()
+    try:
+        stored = db.query(DbSession).filter(DbSession.id == session_id).first()
+        if stored:
+            quiz_data = asdict(result)
+            if payload.material_ids is not None:
+                quiz_data["material_ids"] = payload.material_ids
+            stored.quiz_json = json.dumps(quiz_data, ensure_ascii=False)
+            db.commit()
+    finally:
+        db.close()
+
 
     return QuizGenerateResponse(
         exam_id=result.exam_id,
@@ -169,6 +281,13 @@ def generate_session_quiz(
     )
 
 
+def _require_session_owner(session_id: int, student_id: int) -> DbSession:
+    sess = _get_session_or_404(session_id)
+    if sess.student_id != student_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Sessione non trovata.")
+    return sess
+
+
 # ---------------------------------------------------------------------------
 # 3 — Avvia loop socratico per una domanda
 # ---------------------------------------------------------------------------
@@ -185,16 +304,24 @@ def tutor_start(
 ) -> TutorStartResponse:
     """Inizializza il SocraticTutor e fa il pre-fetch dei chunk RAG."""
     sess = _get_session_or_404(session_id)
+    quiz = json.loads(sess.quiz_json or "{}")
+    canonical = next((question for question in quiz.get("questions", [])
+                      if question.get("id") == payload.question.id), None)
+    if canonical is None or QuestionOut(**canonical) != payload.question:
+        raise HTTPException(status_code=422, detail="La domanda non appartiene al quiz salvato.")
+    answered = {item.get("question_id") for item in json.loads(sess.qa_log or "[]")}
+    if payload.question.id in answered or sess.current_turn_json:
+        raise HTTPException(status_code=409, detail="Domanda già avviata o completata.")
 
     tutor = SocraticTutor(
         student_id=student_id,
         exam_id=sess.exam_id,
+        material_ids=quiz.get("material_ids"),
     )
-    q_dict = payload.question.model_dump()
+    q_dict = canonical
     question_text = tutor.start(q_dict)
 
-    key = f"{session_id}_{payload.question.id}"
-    _active_tutors[key] = tutor
+    _persist_turn(session_id, tutor)
 
     return TutorStartResponse(
         question_text=question_text,
@@ -213,21 +340,25 @@ def tutor_start(
     summary="Invia la prima risposta, ricevi la domanda guida socratica",
 )
 def tutor_answer1(session_id: int, payload: Answer1Request) -> Answer1Response:
-    key = f"{session_id}_{payload.question_id}"
-    tutor = _active_tutors.get(key)
+    sess = _get_session_or_404(session_id)
+    tutor = _tutor_from_session(sess, payload.question_id, student_id=sess.student_id or 0)
     if not tutor:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Nessun tutor attivo per sessione {session_id}, domanda {payload.question_id}.",
         )
     try:
+        tutor._assert_state(TurnState.WAITING_ANSWER_1)
+        tutor.attempt.student_answer_1 = payload.answer.strip()
+        _persist_turn(session_id, tutor)  # conserva il testo anche se il modello non risponde
         data = tutor.submit_answer_1(payload.answer)
+        _persist_turn(session_id, tutor)
     except RuntimeError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Turno non disponibile. Ricarica la sessione.") from exc
     except Exception as exc: # pylint: disable=broad-exception-caught
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Errore generazione domanda guida: {exc}",
+            detail="Impossibile generare la domanda guida. Riprova.",
         ) from exc
 
     return Answer1Response(
@@ -247,21 +378,25 @@ def tutor_answer1(session_id: int, payload: Answer1Request) -> Answer1Response:
     summary="Invia la seconda risposta, ricevi la valutazione",
 )
 def tutor_answer2(session_id: int, payload: Answer2Request) -> Answer2Response:
-    key = f"{session_id}_{payload.question_id}"
-    tutor = _active_tutors.get(key)
+    sess = _get_session_or_404(session_id)
+    tutor = _tutor_from_session(sess, payload.question_id, student_id=sess.student_id or 0)
     if not tutor:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Nessun tutor attivo per sessione {session_id}, domanda {payload.question_id}.",
         )
     try:
+        tutor._assert_state(TurnState.WAITING_ANSWER_2)
+        tutor.attempt.student_answer_2 = payload.answer.strip()
+        _persist_turn(session_id, tutor)  # conserva il testo anche se il modello non risponde
         data = tutor.submit_answer_2(payload.answer)
+        _persist_turn(session_id, tutor)
     except RuntimeError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Turno non disponibile. Ricarica la sessione.") from exc
     except Exception as exc: # pylint: disable=broad-exception-caught
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Errore valutazione: {exc}",
+            detail="Impossibile valutare la risposta. Riprova.",
         ) from exc
 
     return Answer2Response(
@@ -270,6 +405,7 @@ def tutor_answer2(session_id: int, payload: Answer2Request) -> Answer2Response:
         correct_points=data["correct_points"],
         missing_points=data["missing_points"],
         improvement_after_guidance=data["improvement_after_guidance"],
+        reliable=data["reliable"],
         can_contest=data["can_contest"],
     )
 
@@ -284,8 +420,8 @@ def tutor_answer2(session_id: int, payload: Answer2Request) -> Answer2Response:
     summary="Contesta la valutazione ricevuta",
 )
 def tutor_contest(session_id: int, payload: ContestRequest) -> ContestResponse:
-    key = f"{session_id}_{payload.question_id}"
-    tutor = _active_tutors.get(key)
+    sess = _get_session_or_404(session_id)
+    tutor = _tutor_from_session(sess, payload.question_id, student_id=sess.student_id or 0)
     if not tutor:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -293,12 +429,13 @@ def tutor_contest(session_id: int, payload: ContestRequest) -> ContestResponse:
         )
     try:
         data = tutor.submit_contestation(payload.argumentation)
+        _persist_turn(session_id, tutor)
     except RuntimeError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Turno non disponibile. Ricarica la sessione.") from exc
     except Exception as exc: # pylint: disable=broad-exception-caught
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Errore rivalutazione: {exc}",
+            detail="Impossibile rivalutare la risposta. Riprova.",
         ) from exc
 
     return ContestResponse(
@@ -321,8 +458,8 @@ def tutor_contest(session_id: int, payload: ContestRequest) -> ContestResponse:
     summary="Chiude la domanda corrente e aggiorna l'engine adattivo",
 )
 def tutor_close(session_id: int, payload: CloseQuestionRequest) -> CloseQuestionResponse:
-    key = f"{session_id}_{payload.question_id}"
-    tutor = _active_tutors.get(key)
+    sess = _get_session_or_404(session_id)
+    tutor = _tutor_from_session(sess, payload.question_id, student_id=sess.student_id or 0)
     if not tutor:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -331,7 +468,7 @@ def tutor_close(session_id: int, payload: CloseQuestionRequest) -> CloseQuestion
     try:
         attempt = tutor.close()
     except RuntimeError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Turno non disponibile. Ricarica la sessione.") from exc
 
     final_score = attempt.final_score
     if final_score is None:
@@ -340,20 +477,20 @@ def tutor_close(session_id: int, payload: CloseQuestionRequest) -> CloseQuestion
             detail="Impossibile chiudere: nessun voto disponibile.",
         )
 
-    # Aggiorna AdaptiveEngine
-    engine = _active_engines.get(session_id)
-    if engine:
-        engine.record_answer(
-            question_id=attempt.question_id,
-            topic=attempt.topic_hint,
-            score=final_score,
-        )
+    # L'engine viene sempre ricostruito dal log persistito.
+    engine = _engine_from_session(sess)
 
     # Persisti il tentativo nel qa_log della DbSession
-    _append_attempt_to_log(session_id, tutor.to_dict())
-
-    # Rimuovi il tutor dall'in-memory store
-    del _active_tutors[key]
+    try:
+        entry = tutor.to_dict()
+        entry["final_score"] = final_score
+        entry["reliable"] = bool(attempt.evaluation is None or attempt.evaluation.reliable)
+        _append_attempt_to_log(session_id, entry)
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Impossibile salvare la risposta. Riprova.",
+        ) from exc
 
     return CloseQuestionResponse(
         final_score=final_score,
@@ -362,19 +499,37 @@ def tutor_close(session_id: int, payload: CloseQuestionRequest) -> CloseQuestion
 
 
 def _append_attempt_to_log(session_id: int, attempt_dict: dict) -> None:
-    """Aggiunge il tentativo serializzato al qa_log della sessione nel DB."""
+    """Record the answer and clear the active turn in one commit."""
     db = SessionLocal()
     try:
         sess = db.query(DbSession).filter(DbSession.id == session_id).first()
-        if not sess:
-            return
+        if not sess or not sess.current_turn_json:
+            raise RuntimeError("Turno non disponibile.")
         existing: list = json.loads(sess.qa_log) if sess.qa_log else []
+        if any(item.get("question_id") == attempt_dict.get("question_id") for item in existing):
+            raise RuntimeError("Domanda già registrata.")
         existing.append(attempt_dict)
         sess.qa_log = json.dumps(existing, ensure_ascii=False)
+        sess.current_turn_json = None
         db.commit()
     except Exception as exc: # pylint: disable=broad-exception-caught
         db.rollback()
-        print(f"[sessions.py] Errore append qa_log: {exc}")
+        raise RuntimeError(
+            f"Impossibile salvare il tentativo della sessione {session_id}: {exc}"
+        ) from exc
+    finally:
+        db.close()
+
+
+def _mark_session_interrupted(session_id: int) -> None:
+    """Persist an interruption while preserving any partial ``qa_log``."""
+    db = SessionLocal()
+    try:
+        sess = db.query(DbSession).filter(DbSession.id == session_id).first()
+        if sess and sess.status == "in_corso":
+            sess.status = "interrotta"
+            sess.ended_at = datetime.now(timezone.utc)
+            db.commit()
     finally:
         db.close()
 
@@ -389,14 +544,13 @@ def _append_attempt_to_log(session_id: int, attempt_dict: dict) -> None:
     summary="Ottieni la prossima domanda suggerita dall'AdaptiveEngine",
 )
 def next_question(session_id: int, payload: NextQuestionRequest) -> NextQuestionResponse:
-    engine = _active_engines.get(session_id)
-    if not engine:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Nessun engine attivo per sessione {session_id}.",
-        )
-
-    remaining = [q.model_dump() for q in payload.remaining_questions]
+    sess = _get_session_or_404(session_id)
+    engine = _engine_from_session(sess)
+    if sess.current_turn_json:
+        raise HTTPException(status_code=409, detail="Concludi la domanda corrente prima di continuare.")
+    answered = {item.get("question_id") for item in json.loads(sess.qa_log or "[]")}
+    remaining = [q for q in json.loads(sess.quiz_json or "{}").get("questions", [])
+                 if q.get("id") not in answered]
     chosen = engine.pick_next_question(remaining)
 
     if chosen is None:
@@ -423,14 +577,11 @@ def next_question(session_id: int, payload: NextQuestionRequest) -> NextQuestion
     summary="Chiude la sessione e genera il report finale",
 )
 def close_session(session_id: int, payload: SessionCloseRequest) -> SessionReportResponse:
-    engine = _active_engines.get(session_id)
-    if not engine:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Nessun engine attivo per sessione {session_id}.",
-        )
+    sess = _get_session_or_404(session_id)
+    engine = _engine_from_session(sess)
 
     report = engine.generate_session_report()
+    snapshot = report_snapshot(report["student_id"], report["exam_id"], session_id)
     paths = save_report(report, session_id, payload.exam_name)
 
     # Aggiorna DB
@@ -441,15 +592,24 @@ def close_session(session_id: int, payload: SessionCloseRequest) -> SessionRepor
             sess.ended_at    = datetime.now(timezone.utc)
             sess.score_total = report["overall_avg"]
             sess.report_path = paths.get("pdf")
+            sess.status      = "completata"
+            sess.current_turn_json = None
             db.commit()
     except Exception as exc: # pylint: disable=broad-exception-caught
         db.rollback()
-        print(f"[sessions.py] Errore aggiornamento sessione al close: {exc}")
+        try:
+            restore_report_snapshot(snapshot)
+        except OSError as cleanup_exc:
+            raise HTTPException(
+                status_code=500,
+                detail="Sessione non completata e pulizia del report incompleta. Contatta l'amministratore.",
+            ) from cleanup_exc
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Sessione non completata: impossibile salvare il report. Riprova.",
+        ) from exc
     finally:
         db.close()
-
-    # Pulisci l'engine
-    _active_engines.pop(session_id, None)
 
     return SessionReportResponse(
         session_id=session_id,
@@ -480,6 +640,19 @@ def get_session(session_id: int) -> SessionResponse:
     return _session_to_response(sess)
 
 
+@router.get("/{session_id}/resume", summary="Ricostruisce lo stato persistito della sessione")
+def resume_session(session_id: int) -> dict:
+    """Restituisce quiz, turno parziale e statistiche ricostruite dal DB."""
+    sess = _get_session_or_404(session_id)
+    return {
+        "session_id": session_id,
+        "status": sess.status,
+        "quiz": json.loads(sess.quiz_json) if sess.quiz_json else None,
+        "current_turn": json.loads(sess.current_turn_json) if sess.current_turn_json else None,
+        "adaptive_engine": _engine_from_session(sess).to_json(),
+    }
+
+
 # ---------------------------------------------------------------------------
 # 11 — Lista sessioni per esame
 # ---------------------------------------------------------------------------
@@ -492,15 +665,9 @@ def get_session(session_id: int) -> SessionResponse:
 def list_sessions(
     exam_id: int = Query(..., description="ID dell'esame"),
 ) -> SessionListResponse:
+    """Restituisce le sessioni senza modificarle, incluse quelle interrotte."""
     db = SessionLocal()
     try:
-        db.query(DbSession).filter(
-            DbSession.exam_id == exam_id,
-            DbSession.started_at.is_not(None),
-            DbSession.score_total.is_(None),
-        ).delete(synchronize_session=False)
-        db.commit()
-
         sessions = (
             db.query(DbSession)
             .filter(DbSession.exam_id == exam_id)

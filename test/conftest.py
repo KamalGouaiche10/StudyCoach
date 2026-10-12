@@ -31,6 +31,16 @@ if "agno.models.groq" not in sys.modules:
     sys.modules["agno.models.groq"] = _groq_stub
 
 
+@pytest.fixture(autouse=True)
+def default_test_model_routing(monkeypatch):
+    """Keep tests independent of a developer's private .env provider choices."""
+    for feature in ("TUTOR", "QUIZ", "NOTES"):
+        monkeypatch.setenv(f"{feature}_PROVIDER", "groq")
+        monkeypatch.delenv(f"{feature}_MODEL", raising=False)
+        monkeypatch.delenv(f"{feature}_FALLBACK_PROVIDER", raising=False)
+        monkeypatch.delenv(f"{feature}_FALLBACK_MODEL", raising=False)
+
+
 # ---------------------------------------------------------------------------
 # Isolamento database (autouse: si applica a OGNI test della suite)
 # ---------------------------------------------------------------------------
@@ -76,7 +86,7 @@ def isolated_chroma(tmp_path, monkeypatch):
 
     fake_client = chromadb.PersistentClient(path=str(tmp_path / "chroma"))
     monkeypatch.setattr(ingestor, "client", fake_client)
-    monkeypatch.setattr(ingestor, "_get_sentence_transformer", lambda: _FakeSentenceTransformer())
+    monkeypatch.setattr(ingestor, "SentenceTransformer", lambda *args, **kwargs: _FakeSentenceTransformer())
     monkeypatch.setattr(ingestor, "_model", None)
 
     yield fake_client
