@@ -373,6 +373,32 @@ def test_multi_pdf_no_collision(tmp_path, monkeypatch):
     assert len({key.split("_p")[0] for key in collection.rows}) == 3
 
 
+def test_reingest_rejects_partial_existing_index(isolated_chroma, sample_pdf_path):
+    stats = ingestor.ingest_pdf(str(sample_pdf_path), 1, 1)
+    collection = ingestor.get_collection(1, 1)
+    indexed = collection.get(where={"file_hash": stats["file_hash"]})["ids"]
+    assert indexed
+    collection.delete(ids=[indexed[0]])
+
+    with pytest.raises(ingestor.MaterialIndexUnavailable, match="Indice incompleto"):
+        ingestor.ingest_pdf(str(sample_pdf_path), 1, 1)
+    assert collection.get(where={"file_hash": stats["file_hash"]})["ids"] == indexed[1:]
+
+
+def test_material_verification_detects_changed_pdf_bytes(isolated_chroma, sample_pdf_path):
+    stats = ingestor.ingest_pdf(str(sample_pdf_path), 1, 1)
+    with SessionLocal() as db:
+        db.add(Material(exam_id=1, filename=sample_pdf_path.name,
+                        stored_path=str(sample_pdf_path), chunks_count=stats["chunks"],
+                        file_hash=stats["file_hash"]))
+        db.commit()
+    assert ingestor.verify_exam_material(1, 1)["ok"]
+    sample_pdf_path.write_bytes(sample_pdf_path.read_bytes() + b"\nchanged")
+    verification = ingestor.verify_exam_material(1, 1)
+    assert not verification["ok"]
+    assert any("modificato" in error for error in verification["errors"])
+
+
 def test_ingest_pdf_indexes_chunks_with_correct_stats(isolated_chroma, sample_pdf_path):
     stats = ingestor.ingest_pdf(str(sample_pdf_path), student_id=1, exam_id=1)
     assert stats["file"] == sample_pdf_path.name

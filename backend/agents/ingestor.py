@@ -275,6 +275,17 @@ def ingest_pdf(pdf_path: str, student_id: int, exam_id: int, source_file: str | 
     existing = collection.get(where={"file_hash": file_hash})
     existing_ids = existing.get("ids") or []
     if existing_ids:
+        expected_ids = []
+        chunk_counter = 0
+        for page_num, text in pages_text:
+            for chunk in _model_safe_chunks(text):
+                if len(chunk.strip()) >= 20:
+                    expected_ids.append(f"{file_hash}_p{page_num}_c{chunk_counter}")
+                    chunk_counter += 1
+        if set(existing_ids) != set(expected_ids):
+            raise MaterialIndexUnavailable(
+                "Indice incompleto per questo PDF. Verifica il materiale e ripristina l'indice prima di riprovare."
+            )
         stats = {
             "file": path.name,
             "file_hash": file_hash,
@@ -328,7 +339,7 @@ def ingest_pdf(pdf_path: str, student_id: int, exam_id: int, source_file: str | 
                 ids=all_ids[i:i + batch_size]
             )
         actual_ids = collection.get(where={"file_hash": file_hash}).get("ids") or []
-        if len(actual_ids) != len(all_ids):
+        if set(actual_ids) != set(all_ids):
             collection.delete(ids=actual_ids)
             raise RuntimeError(
                 f"Verifica ingestione fallita per {path.name}: attesi {len(all_ids)} chunk, "
@@ -408,6 +419,8 @@ def verify_exam_material(
             details.append(detail)
             if not file_exists:
                 errors.append(f"File mancante: {material.filename}")
+            elif expected_hash and hashlib.sha256(path.read_bytes()).hexdigest() != expected_hash:
+                errors.append(f"Contenuto del file modificato: {material.filename}")
             if actual_count != (material.chunks_count or 0):
                 errors.append(
                     f"Chunk incoerenti per {material.filename}: attesi {material.chunks_count or 0}, trovati {actual_count}"
