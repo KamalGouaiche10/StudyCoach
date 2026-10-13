@@ -56,6 +56,8 @@ class Session(Base):
     student_id  = Column(Integer, nullable=True)
     started_at  = Column(DateTime(timezone=True), default=now_utc)
     ended_at    = Column(DateTime(timezone=True), nullable=True)
+    active_started_at = Column(DateTime(timezone=True), nullable=True)
+    duration_seconds = Column(Float, nullable=False, default=0.0)
     score_total = Column(Float, nullable=True)
     qa_log      = Column(Text, nullable=True)   # JSON serializzato
     quiz_json   = Column(Text, nullable=True)
@@ -108,6 +110,7 @@ def init_db():
     _ensure_material_file_hash_column()
     _ensure_material_page_stats_columns()
     _ensure_session_persistence_columns()
+    _ensure_session_clock_columns()
     _ensure_student_token_security_columns()
     _ensure_doubt_history_columns()
 
@@ -171,6 +174,21 @@ def _ensure_session_persistence_columns():
             conn.execute(text("ALTER TABLE sessions ADD COLUMN current_turn_json TEXT"))
         if "student_id" not in columns:
             conn.execute(text("ALTER TABLE sessions ADD COLUMN student_id INTEGER"))
+
+
+def _ensure_session_clock_columns():
+    from sqlalchemy import inspect, text
+    columns = {c["name"] for c in inspect(engine).get_columns("sessions")}
+    with engine.begin() as conn:
+        if "duration_seconds" not in columns:
+            conn.execute(text("ALTER TABLE sessions ADD COLUMN duration_seconds FLOAT NOT NULL DEFAULT 0"))
+            conn.execute(text("UPDATE sessions SET duration_seconds = MAX(0, "
+                              "(julianday(ended_at) - julianday(started_at)) * 86400) "
+                              "WHERE ended_at IS NOT NULL AND started_at IS NOT NULL"))
+        if "active_started_at" not in columns:
+            conn.execute(text("ALTER TABLE sessions ADD COLUMN active_started_at DATETIME"))
+            conn.execute(text("UPDATE sessions SET active_started_at = started_at "
+                              "WHERE status = 'in_corso' AND started_at IS NOT NULL"))
 
 
 def _ensure_session_token_column():

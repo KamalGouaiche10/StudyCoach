@@ -8,6 +8,28 @@ def test_init_db_is_idempotent():
     init_db()  # non deve sollevare eccezioni ne' duplicare tabelle
 
 
+def test_session_clock_columns_migrate_existing_sessions(tmp_path, monkeypatch):
+    from sqlalchemy import create_engine, inspect, text
+    from backend.db import models
+    old_engine = create_engine(f"sqlite:///{tmp_path / 'old_sessions.db'}")
+    with old_engine.begin() as conn:
+        conn.execute(text("CREATE TABLE sessions (id INTEGER PRIMARY KEY, started_at DATETIME, "
+                          "ended_at DATETIME, status VARCHAR(20))"))
+        conn.execute(text("INSERT INTO sessions VALUES "
+                          "(1, '2026-10-13 10:00:00', '2026-10-13 10:01:30', 'completata'), "
+                          "(2, '2026-10-13 10:00:00', NULL, 'in_corso')"))
+    monkeypatch.setattr(models, "engine", old_engine)
+    models._ensure_session_clock_columns()
+    models._ensure_session_clock_columns()
+    assert {"duration_seconds", "active_started_at"} <= {
+        column["name"] for column in inspect(old_engine).get_columns("sessions")}
+    with old_engine.connect() as conn:
+        rows = conn.execute(text("SELECT duration_seconds, active_started_at "
+                                 "FROM sessions ORDER BY id")).all()
+    assert round(rows[0][0]) == 90
+    assert rows[1][1] == "2026-10-13 10:00:00"
+
+
 def test_token_index_is_added_after_legacy_student_columns(tmp_path, monkeypatch):
     from sqlalchemy import create_engine, inspect, text
     from backend.db import models

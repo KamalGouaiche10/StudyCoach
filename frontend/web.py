@@ -432,12 +432,16 @@ def study(request: Request, session_id: int, user=Depends(_user)):
     _, exam = _session(session_id, user.id)
     detail = session_extras.session_detail(session_id)
     scored = [item["final_score"] for item in detail["attempts"]
-              if isinstance(item.get("final_score"), (int, float)) and item.get("reliable", True) is not False]
+              if isinstance(item.get("final_score"), (int, float))
+              and not isinstance(item.get("final_score"), bool)]
     average = round(sum(scored) / len(scored), 1) if scored else None
     progress = round(100 * len(detail["attempts"]) / len(detail["questions"])) if detail["questions"] else 0
+    duration = int(detail["duration_seconds"])
+    duration_text = f"{duration // 3600:02d}:{duration // 60 % 60:02d}:{duration % 60:02d}"
     error, ok = _notice(request)
     return _page(request, "study.html", user=user, exam=exam, detail=detail,
-                 average=average, progress=progress, error=error, ok=ok)
+                 average=average, scored_count=len(scored), progress=progress,
+                 duration_text=duration_text, error=error, ok=ok)
 
 
 @router.post("/study/{session_id}/advance")
@@ -648,10 +652,13 @@ def _history_page(request: Request, exam_id: int, user, notes_id: int | None = N
     items = exams.list_exams(user.id).exams
     records = sessions.list_sessions(exam_id).sessions
     details = {record.id: session_extras.session_detail(record.id) for record in records}
+    durations = {record.id: f"{int(details[record.id]['duration_seconds']) // 3600:02d}:"
+                 f"{int(details[record.id]['duration_seconds']) // 60 % 60:02d}:"
+                 f"{int(details[record.id]['duration_seconds']) % 60:02d}" for record in records}
     completed = [record.score_total for record in records if record.score_total is not None]
     error, ok = _notice(request)
     return _page(request, "history.html", user=user, exams=items, exam=exam, sessions=records,
-                 details=details, completed=len(completed), mean=round(sum(completed) / len(completed), 1) if completed else None,
+                 details=details, durations=durations, completed=len(completed), mean=round(sum(completed) / len(completed), 1) if completed else None,
                  best=max(completed) if completed else None, error=error, ok=ok,
                  notes_id=notes_id, notes_html=notes_html)
 

@@ -141,6 +141,7 @@ class SessionResponse(BaseModel):
     exam_id: int
     started_at: Optional[datetime] = None
     ended_at: Optional[datetime] = None
+    duration_seconds: float = 0.0
     score_total: Optional[float] = None
     report_path: Optional[str] = None
     report_available: bool = False

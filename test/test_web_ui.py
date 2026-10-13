@@ -3,6 +3,7 @@
 import base64
 import json
 import uuid
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from fastapi import HTTPException
@@ -365,6 +366,71 @@ def test_study_starts_first_question_and_completes_after_last_answer(api_client,
     assert closed.status_code == 303
     assert completed == [int(study_url.rsplit("/", 1)[1])]
     assert "Sessione completata" in api_client.get(study_url).text
+
+
+def test_study_counts_unreliable_scores(api_client):
+    student_id = _register(api_client)
+    exam_id = int(api_client.post("/web/exams", data={"name": "Letteratura"}, follow_redirects=False)
+                  .headers["location"].rsplit("/", 1)[1])
+    attempts = [
+        {"question_id": number, "question_text": f"Domanda {number}?", "final_score": score,
+         "reliable": reliable, "evaluation": {"reliable": reliable,
+         "motivation": "Risposta completa" if reliable else
+         "Valutazione non affidabile: voto alto incoerente con molte lacune"}}
+        for number, score, reliable in ((1, 8, False), (2, 8, False), (3, 10, True))
+    ]
+    with SessionLocal() as db:
+        session = DbSession(exam_id=exam_id, student_id=student_id, status="completata",
+                            score_total=8.7, quiz_json=json.dumps({"questions": [
+                                {"id": number, "text": f"Domanda {number}?"} for number in (1, 2, 3)]}),
+                            qa_log=json.dumps(attempts))
+        db.add(session)
+        db.commit()
+        session_id = session.id
+    page = api_client.get(f"/web/study/{session_id}")
+    assert page.status_code == 200
+    assert "Media calcolata su 3 valutazioni su 3" in page.text
+    assert "8.7<small>/10</small>" in page.text
+    assert page.text.count("giudizio incoerente") >= 2
+    assert "voto alto incoerente con molte lacune" not in page.text
+
+
+def test_interrupted_session_shows_saved_duration(api_client):
+    student_id = _register(api_client)
+    exam_id = int(api_client.post("/web/exams", data={"name": "Fisica"}, follow_redirects=False)
+                  .headers["location"].rsplit("/", 1)[1])
+    with SessionLocal() as db:
+        session = DbSession(exam_id=exam_id, student_id=student_id, status="interrotta",
+                            duration_seconds=90, quiz_json=json.dumps({"questions": []}))
+        db.add(session)
+        db.commit()
+        session_id = session.id
+    page = api_client.get(f"/web/study/{session_id}")
+    assert page.status_code == 200
+    assert 'data-running="false"' in page.text
+    assert "00:01:30" in page.text
+    history = api_client.get(f"/web/history/{exam_id}")
+    assert "Durata 00:01:30" in history.text
+
+
+def test_live_timer_checkpoint_is_saved_to_db(api_client):
+    student_id = _register(api_client)
+    exam_id = int(api_client.post("/web/exams", data={"name": "Fisica"}, follow_redirects=False)
+                  .headers["location"].rsplit("/", 1)[1])
+    with SessionLocal() as db:
+        session = DbSession(exam_id=exam_id, student_id=student_id, status="in_corso",
+                            active_started_at=datetime.now(timezone.utc) - timedelta(seconds=75),
+                            duration_seconds=0)
+        db.add(session)
+        db.commit()
+        session_id = session.id
+    response = api_client.post(f"/sessions/{session_id}/timer")
+    assert response.status_code == 200
+    assert 74 <= response.json()["duration_seconds"] < 90
+    with SessionLocal() as db:
+        saved = db.get(DbSession, session_id)
+        assert saved.duration_seconds >= 74
+        assert saved.active_started_at is not None
 
 
 def test_evaluated_second_question_can_continue_to_third(api_client, monkeypatch):

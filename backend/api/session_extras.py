@@ -11,6 +11,7 @@ from backend.agents.notes_generator import generate_notes_from_log
 from backend.agents.report_generator import delete_session_reports, report_snapshot, restore_report_snapshot, save_report
 from backend.api.authorization import require_api_owner
 from backend.db.models import Exam, Session as DbSession, SessionLocal
+from backend.session_clock import elapsed_seconds, pause_clock, resume_clock
 from backend.error_messages import public_error
 
 logger = logging.getLogger(__name__)
@@ -33,6 +34,8 @@ def session_detail(session_id: int) -> dict:
     return {
         "id": session.id, "exam_id": session.exam_id,
         "started_at": session.started_at, "ended_at": session.ended_at,
+        "duration_seconds": elapsed_seconds(session),
+        "timer_running": session.status == "in_corso" and session.active_started_at is not None,
         "status": session.status, "score_total": session.score_total,
         "questions": quiz.get("questions", []), "attempts": attempts,
         "current_turn": json.loads(session.current_turn_json) if session.current_turn_json else None,
@@ -46,10 +49,26 @@ def interrupt_session(session_id: int) -> dict:
     with SessionLocal() as db:
         session = db.get(DbSession, session_id)
         if session.score_total is None and session.status == "in_corso":
+            pause_clock(session)
             session.status = "interrotta"
             session.ended_at = datetime.now(timezone.utc)
             db.commit()
     return {"message": "Sessione interrotta."}
+
+
+@router.post("/{session_id}/timer")
+def save_session_timer(session_id: int) -> dict:
+    """Checkpoint the live timer so elapsed time survives an unexpected exit."""
+    with SessionLocal() as db:
+        session = db.get(DbSession, session_id)
+        if session is None:
+            raise HTTPException(status_code=404, detail="Sessione non trovata.")
+        if session.status == "in_corso" and session.active_started_at is not None:
+            now = datetime.now(timezone.utc)
+            pause_clock(session, now)
+            resume_clock(session, now)
+            db.commit()
+        return {"duration_seconds": elapsed_seconds(session), "status": session.status}
 
 
 @router.post("/{session_id}/resume-active")
@@ -58,6 +77,7 @@ def reactivate_session(session_id: int) -> dict:
         session = db.get(DbSession, session_id)
         if session.status not in {"in_corso", "interrotta"} or not session.quiz_json:
             raise HTTPException(status_code=409, detail="Sessione non riprendibile.")
+        resume_clock(session)
         session.status = "in_corso"
         session.ended_at = None
         db.commit()
@@ -69,6 +89,7 @@ def mark_incomplete_closed(session_id: int) -> dict:
     with SessionLocal() as db:
         session = db.get(DbSession, session_id)
         if session.ended_at is None:
+            pause_clock(session)
             session.ended_at = datetime.now(timezone.utc)
             session.status = "interrotta"
             db.commit()
@@ -121,8 +142,8 @@ def regenerate_report(session_id: int) -> dict:
         raise HTTPException(status_code=409, detail="Sessione senza voto finale.")
     attempts = json.loads(session.qa_log or "[]")
     scored = [item for item in attempts if isinstance(item, dict)
-              and item.get("reliable", True) is not False
-              and isinstance(item.get("final_score"), (int, float))]
+              and isinstance(item.get("final_score"), (int, float))
+              and not isinstance(item.get("final_score"), bool)]
     if not scored:
         raise HTTPException(status_code=409, detail="Nessuna risposta valutata per il report.")
     topic_scores: dict[str, list[float]] = {}

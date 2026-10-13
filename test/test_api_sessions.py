@@ -488,7 +488,7 @@ def test_close_session_db_failure_removes_new_reports(api_client, sample_pdf_pat
         "n_questions_answered": 0, "weak_topics": [], "strong_topics": [],
         "topic_breakdown": [], "summary": "Sessione conclusa.",
     }
-    monkeypatch.setattr(sessions_api, "_engine_from_session", lambda sess: SimpleNamespace(generate_session_report=lambda: report))
+    monkeypatch.setattr(sessions_api, "_engine_from_session", lambda sess, **_kwargs: SimpleNamespace(generate_session_report=lambda: report))
     original_session_local = sessions_api.SessionLocal
 
     def failing_session():
@@ -532,3 +532,5 @@ def test_unreliable_double_judgment_is_excluded_from_adaptive_engine():
     }]))
     rebuilt = _engine_from_session(sess)
     assert rebuilt.stats.answered_question_ids == []
+    report_engine = _engine_from_session(sess, include_unreliable=True)
+    assert report_engine.stats.overall_avg == 1

@@ -17,6 +17,7 @@ from backend.agents.report_generator import save_report, report_snapshot, restor
 from backend.agents.socratic_tutor import SocraticTutor, QuestionAttempt, TurnState, EvaluationResult, ContestationResult
 from backend.db.models import Session as DbSession
 from backend.db.models import SessionLocal
+from backend.session_clock import elapsed_seconds, pause_clock
 from backend.models.schemas import (
     Answer1Request,
     Answer1Response,
@@ -48,17 +49,17 @@ router = APIRouter(prefix="/sessions", tags=["sessions"], dependencies=[Depends(
 
 # ---------------------------------------------------------------------------
 
-def _engine_from_session(sess: DbSession) -> AdaptiveEngine:
+def _engine_from_session(sess: DbSession, *, include_unreliable: bool = False) -> AdaptiveEngine:
     engine = AdaptiveEngine(student_id=sess.student_id or 0, exam_id=sess.exam_id)
     for attempt in json.loads(sess.qa_log or "[]"):
         evaluation = attempt.get("evaluation") or {}
         contestation = attempt.get("contestation_result") or {}
-        if attempt.get("reliable") is False or evaluation.get("reliable") is False:
+        if not include_unreliable and (attempt.get("reliable") is False or evaluation.get("reliable") is False):
             continue
-        score = (
-            contestation.get("final_score", evaluation.get("score"))
-            if contestation.get("reliable", True) else evaluation.get("score")
-        )
+        score = attempt.get("final_score")
+        if score is None:
+            score = (contestation.get("final_score", evaluation.get("score"))
+                     if contestation.get("reliable", True) else evaluation.get("score"))
         if score is not None:
             engine.record_answer(attempt["question_id"], attempt.get("topic_hint", ""), score)
     return engine
@@ -133,6 +134,7 @@ def _session_to_response(sess: DbSession) -> SessionResponse:
         exam_id=sess.exam_id,
         started_at=sess.started_at,
         ended_at=sess.ended_at,
+        duration_seconds=elapsed_seconds(sess),
         score_total=sess.score_total,
         report_path=sess.report_path,
         report_available=bool(sess.report_path and Path(sess.report_path).is_file()),
@@ -165,7 +167,9 @@ def create_session(
         )
     db = SessionLocal()
     try:
-        sess = DbSession(exam_id=payload.exam_id, student_id=student_id, status="in_corso")
+        started = datetime.now(timezone.utc)
+        sess = DbSession(exam_id=payload.exam_id, student_id=student_id, status="in_corso",
+                         started_at=started, active_started_at=started, duration_seconds=0.0)
         db.add(sess)
         db.commit()
         db.refresh(sess)
@@ -527,6 +531,7 @@ def _mark_session_interrupted(session_id: int) -> None:
     try:
         sess = db.query(DbSession).filter(DbSession.id == session_id).first()
         if sess and sess.status == "in_corso":
+            pause_clock(sess)
             sess.status = "interrotta"
             sess.ended_at = datetime.now(timezone.utc)
             db.commit()
@@ -578,7 +583,7 @@ def next_question(session_id: int, payload: NextQuestionRequest) -> NextQuestion
 )
 def close_session(session_id: int, payload: SessionCloseRequest) -> SessionReportResponse:
     sess = _get_session_or_404(session_id)
-    engine = _engine_from_session(sess)
+    engine = _engine_from_session(sess, include_unreliable=True)
 
     report = engine.generate_session_report()
     snapshot = report_snapshot(report["student_id"], report["exam_id"], session_id)
@@ -589,6 +594,7 @@ def close_session(session_id: int, payload: SessionCloseRequest) -> SessionRepor
     try:
         sess = db.query(DbSession).filter(DbSession.id == session_id).first()
         if sess:
+            pause_clock(sess)
             sess.ended_at    = datetime.now(timezone.utc)
             sess.score_total = report["overall_avg"]
             sess.report_path = paths.get("pdf")
