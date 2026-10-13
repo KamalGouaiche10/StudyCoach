@@ -354,7 +354,7 @@ def tutor_answer1(session_id: int, payload: Answer1Request) -> Answer1Response:
     try:
         tutor._assert_state(TurnState.WAITING_ANSWER_1)
         tutor.attempt.student_answer_1 = payload.answer.strip()
-        _persist_turn(session_id, tutor)  # conserva il testo anche se il modello non risponde
+        _persist_turn(session_id, tutor)
         data = tutor.submit_answer_1(payload.answer)
         _persist_turn(session_id, tutor)
     except RuntimeError as exc:
@@ -392,7 +392,7 @@ def tutor_answer2(session_id: int, payload: Answer2Request) -> Answer2Response:
     try:
         tutor._assert_state(TurnState.WAITING_ANSWER_2)
         tutor.attempt.student_answer_2 = payload.answer.strip()
-        _persist_turn(session_id, tutor)  # conserva il testo anche se il modello non risponde
+        _persist_turn(session_id, tutor)
         data = tutor.submit_answer_2(payload.answer)
         _persist_turn(session_id, tutor)
     except RuntimeError as exc:

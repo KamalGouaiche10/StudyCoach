@@ -66,7 +66,7 @@ class AdaptiveEngine:
 
     def record_answer(self, question_id: int, topic: str, score: int) -> None:
 
-        score = max(0, min(10, score))  # clamp difensivo
+        score = max(0, min(10, score))
 
         if topic not in self.stats.topic_stats:
             self.stats.topic_stats[topic] = TopicStats(topic=topic)

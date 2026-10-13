@@ -497,7 +497,7 @@ def test_validate_notes_accepts_short_source_based_notes():
 
 
 def test_validate_notes_rejects_missing_required_section():
-    text = ("## Titolo\n\n" + ("parola " * 700))  # manca Definizione e Riepilogo
+    text = ("## Titolo\n\n" + ("parola " * 700))
     ok, msg = ng._validate_notes(text)
     assert ok is False
 
@@ -542,7 +542,7 @@ def test_extract_weak_topics_filters_low_scores_and_dedupes():
         {"final_score": 3, "topic_hint": "derivate"},
         {"final_score": 8, "topic_hint": "limiti"},
         {"final_score": 4, "topic_hint": "derivate"},
-        {"final_score": 2, "topic_hint": ""},  # topic vuoto, ignorato
+        {"final_score": 2, "topic_hint": ""},
     ]
     assert ng._extract_weak_topics(attempts) == ["derivate"]
 

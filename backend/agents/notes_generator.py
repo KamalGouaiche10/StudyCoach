@@ -33,7 +33,7 @@ load_dotenv()
 PROMPT_VERSION = "notes_generator_v1"
 PROMPT_PATH = Path(__file__).parent / "prompts" / f"{PROMPT_VERSION}.txt"
 DEFAULT_MODEL = GROQ_MODEL
-DEFAULT_N_CHUNKS = None  # Legacy argument; all indexed passages are considered.
+DEFAULT_N_CHUNKS = None
 RETRY_DELAY = 5
 MAX_LLM_ATTEMPTS = 4
 MAX_REVIEW_ATTEMPTS = 3
@@ -47,8 +47,8 @@ MAX_CHUNK_CHARS = 1200
 # Margini PDF (in mm)
 LEFT_MARGIN = 18
 RIGHT_MARGIN = 18
-TOP_MARGIN = 25      # Aumentato per evitare header
-BOTTOM_MARGIN = 22   # Aumentato per evitare footer
+TOP_MARGIN = 25
+BOTTOM_MARGIN = 22
 
 # Altezze di linea (in mm)
 LINE_HEIGHT = 5.5

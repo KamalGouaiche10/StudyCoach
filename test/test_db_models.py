@@ -5,7 +5,7 @@ from backend.db.models import DoubtConversation, DoubtThread, Exam, Material, Se
 
 def test_init_db_is_idempotent():
     init_db()
-    init_db()  # non deve sollevare eccezioni ne' duplicare tabelle
+    init_db()
 
 
 def test_session_clock_columns_migrate_existing_sessions(tmp_path, monkeypatch):

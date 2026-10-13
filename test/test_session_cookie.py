@@ -97,4 +97,4 @@ def test_invalidate_token_clears_it():
 
 
 def test_invalidate_token_noop_for_falsy_id():
-    invalidate_token(None)  # non deve sollevare eccezioni
+    invalidate_token(None)

@@ -24,7 +24,7 @@ load_dotenv()
 PROMPT_VERSION = "quiz_generator_v1"
 PROMPT_PATH = Path(__file__).parent / "prompts" / f"{PROMPT_VERSION}.txt"
 DEFAULT_N_QUESTIONS = 5
-DEFAULT_N_CHUNKS = None  # Legacy argument; all indexed passages are considered.
+DEFAULT_N_CHUNKS = None
 MAX_QUIZ_CONTEXT_CHARS = 8000
 MAX_QUIZ_BATCHES = 6
 MAX_INVALID_QUIZ_ATTEMPTS = 2
@@ -64,7 +64,7 @@ def _quiz_limit_error(error: Exception, provider: str, *, previous_provider: str
 class Question:
     id: int
     text: str
-    difficulty: str  # "base" | "intermedia" | "avanzata"
+    difficulty: str
     topic_hint: str
 
 

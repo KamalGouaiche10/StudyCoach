@@ -213,7 +213,7 @@ class ContestResponse(BaseModel):
     final_score: int = Field(..., ge=0, le=10)
     score_changed: bool
     score_delta: int
-    contestation_assessment: str  # "valido" | "parzialmente_valido" | "non_valido"
+    contestation_assessment: str
     final_motivation: str
     response_to_student: str
 

@@ -59,7 +59,7 @@ class Session(Base):
     active_started_at = Column(DateTime(timezone=True), nullable=True)
     duration_seconds = Column(Float, nullable=False, default=0.0)
     score_total = Column(Float, nullable=True)
-    qa_log      = Column(Text, nullable=True)   # JSON serializzato
+    qa_log      = Column(Text, nullable=True)
     quiz_json   = Column(Text, nullable=True)
     current_turn_json = Column(Text, nullable=True)
     report_path = Column(String(200), nullable=True)

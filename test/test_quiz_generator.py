@@ -228,7 +228,7 @@ def test_invalid_batch_does_not_discard_grounded_batch(monkeypatch):
 
     monkeypatch.setattr(qg, "_make_quiz_agent", lambda *_: Agent())
     assert qg.generate_quiz(1, 1, n_questions=2).n_questions == 1
-    assert len(calls) == 4  # bounded recovery cannot invent a distinct grounded question
+    assert len(calls) == 4
 
 
 def test_invalid_batch_recovers_missing_question_from_other_selected_context(monkeypatch):

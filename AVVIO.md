@@ -1,5 +1,7 @@
 # Avviare Study Coach
 
+Per la descrizione aggiornata dei flussi, del contatore di sessione e delle modifiche correnti, vedi [Study_Coach_Documentazione.pdf](Study_Coach_Documentazione.pdf).
+
 ## Requisiti
 
 - Python >= 3.13

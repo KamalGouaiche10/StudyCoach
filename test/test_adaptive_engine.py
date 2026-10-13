@@ -48,7 +48,7 @@ def test_record_answer_creates_topic_and_clamps_score():
     engine = AdaptiveEngine(student_id=1, exam_id=1)
     engine.record_answer(question_id=1, topic="reti neurali", score=15)
     stats = engine.stats.topic_stats["reti neurali"]
-    assert stats.scores == [10]  # clamp a 10
+    assert stats.scores == [10]
 
 
 def test_record_answer_clamps_negative_score():

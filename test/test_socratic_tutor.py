@@ -325,13 +325,13 @@ def test_socratic_tutor_full_happy_path(monkeypatch, fake_agent_factory, questio
 
     closed = tutor.close()
     assert closed.state == TurnState.CLOSED
-    assert closed.final_score == 8  # la contestazione prevale sulla valutazione iniziale
+    assert closed.final_score == 8
 
 
 def test_socratic_tutor_non_answer_second_reply_forces_zero(monkeypatch, fake_agent_factory, question_data):
     monkeypatch.setattr(st_mod, "search_passages", lambda **kwargs: [{"text": "chunk", "source": "fonte.pdf", "page": 2}])
     monkeypatch.setattr(st_mod, "_guide_agent", fake_agent_factory(GUIDE_JSON))
-    monkeypatch.setattr(st_mod, "_eval_agent", fake_agent_factory(EVAL_JSON))  # score=7 dall'agente
+    monkeypatch.setattr(st_mod, "_eval_agent", fake_agent_factory(EVAL_JSON))
 
     tutor = SocraticTutor(student_id=1, exam_id=1)
     tutor.start(question_data)
