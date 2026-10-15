@@ -2,6 +2,7 @@
 
 from contextlib import asynccontextmanager
 import os
+import time
 from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -17,6 +18,7 @@ from backend.api.session_extras import router as session_extras_router
 from backend.db.models import init_db
 from frontend.web import router as web_router
 from backend.session_cookie import COOKIE_NAME, verify_token
+from backend.observability import start_trace, end_trace, trace_event
 
 # ---------------------------------------------------------------------------
 # Inizializzazione app
@@ -54,6 +56,23 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def trace_requests(request: Request, call_next):
+    trace_id, token, started = start_trace()
+    try:
+        response = await call_next(request)
+        response.headers["X-Request-ID"] = trace_id
+        trace_event("http", method=request.method, path=request.url.path,
+                    status=response.status_code, elapsed_ms=round((time.perf_counter() - started) * 1000))
+        return response
+    except Exception:
+        trace_event("http_error", method=request.method, path=request.url.path,
+                    elapsed_ms=round((time.perf_counter() - started) * 1000))
+        raise
+    finally:
+        end_trace(token)
 
 
 @app.middleware("http")

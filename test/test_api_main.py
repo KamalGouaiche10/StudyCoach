@@ -5,6 +5,7 @@ def test_health_check(api_client):
     resp = api_client.get("/health")
     assert resp.status_code == 200
     assert resp.json() == {"status": "ok", "service": "Study Coach API"}
+    assert len(resp.headers["X-Request-ID"]) == 32
 
 
 def test_docs_available(api_client):

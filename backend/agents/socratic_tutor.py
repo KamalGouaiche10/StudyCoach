@@ -23,6 +23,7 @@ from backend.agents.llm_errors import (
 )
 from backend.agents.evaluation_validator import validate_contestation, validate_evaluation
 from backend.agents.quality_controls import add_citations, delimit_contestation, is_spoiler, rubric_score, parse_json_object
+from backend.observability import run_agent
 
 load_dotenv()
 
@@ -212,8 +213,14 @@ def _is_non_answer(text: str) -> bool:
     )
 
 
+def _is_role_spoofing_only(text: str) -> bool:
+    """Reject a reply that consists entirely of a forged instruction role."""
+    return bool(re.match(r"(?is)^\s*(?:\[system\]|<\|system\|>).*", text))
+
+
 def _apply_severity_guardrails(attempt: QuestionAttempt, evaluation: EvaluationResult) -> EvaluationResult:
-    if not _is_non_answer(attempt.student_answer_2):
+    if not (_is_non_answer(attempt.student_answer_2)
+            or _is_role_spoofing_only(attempt.student_answer_2)):
         return evaluation
 
     missing_points = list(evaluation.missing_points)
@@ -222,8 +229,8 @@ def _apply_severity_guardrails(attempt: QuestionAttempt, evaluation: EvaluationR
         missing_points.append(strict_missing)
 
     strict_motivation = (
-        "Valutazione severa applicata: la seconda risposta e' una non-risposta "
-        "(es. 'non so') e non dimostra comprensione del contenuto."
+        "Valutazione severa applicata: la seconda risposta non contiene "
+        "una risposta disciplinare valutabile."
     )
     if evaluation.motivation:
         strict_motivation = f"{strict_motivation} {evaluation.motivation}"
@@ -417,7 +424,7 @@ def _generate_guiding_question(
 
     for attempt_num in range(1, MAX_LLM_ATTEMPTS + 1):
         try:
-            output = agent.run(prompt, stream=False)
+            output = run_agent(agent, prompt, "tutor_guide")
             raw = output.get_content_as_string()
 
             data = _parse_json(raw)
@@ -466,7 +473,7 @@ def _evaluate_one(
     validation_failures = 0
     for attempt_num in range(1, MAX_LLM_ATTEMPTS + 1):
         try:
-            output = agent.run(prompt, stream=False)
+            output = run_agent(agent, prompt, "tutor_evaluate")
             raw = output.get_content_as_string()
 
             data = _parse_json(raw)
@@ -567,7 +574,7 @@ def _re_evaluate_after_contestation(
 
     for attempt_num in range(1, MAX_LLM_ATTEMPTS + 1):
         try:
-            output = agent.run(prompt, stream=False)
+            output = run_agent(agent, prompt, "tutor_contest")
             raw = output.get_content_as_string()
 
             data = _parse_json(raw)
@@ -613,7 +620,7 @@ def _generate_opening_question(
 
     for attempt_num in range(1, MAX_LLM_ATTEMPTS + 1):
         try:
-            output = agent.run(prompt, stream=False)
+            output = run_agent(agent, prompt, "doubt_open")
             raw = output.get_content_as_string()
 
             data = _parse_json(raw)
@@ -646,7 +653,7 @@ def _evaluate_doubt(
 
     for attempt_num in range(1, MAX_LLM_ATTEMPTS + 1):
         try:
-            output = agent.run(prompt, stream=False)
+            output = run_agent(agent, prompt, "doubt_evaluate")
             raw = output.get_content_as_string()
 
             data = _parse_json(raw)

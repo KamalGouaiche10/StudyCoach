@@ -10,9 +10,9 @@ import hashlib
 import json
 import os
 import platform
-import subprocess
 import sys
 from datetime import datetime, timezone
+from importlib.metadata import distributions
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -56,10 +56,10 @@ def load_cases() -> list[dict]:
 
 
 def _metadata() -> dict:
-    try:
-        dependencies = subprocess.check_output([sys.executable, "-m", "pip", "freeze"], text=True).splitlines()
-    except Exception:
-        dependencies = []
+    dependencies = sorted(
+        f"{dist.metadata['Name']}=={dist.version}"
+        for dist in distributions() if dist.metadata.get("Name")
+    )
     return {
         "date_utc": datetime.now(timezone.utc).isoformat(),
         "model": GROQ_MODEL,
@@ -105,10 +105,15 @@ def _execute_real_case(case: dict) -> dict:
     return {"raw": raw, "parsed": parsed, "model": GROQ_MODEL}
 
 
-def run(validate_only: bool = False) -> Path:
+def run(validate_only: bool = False, case_ids: set[str] | None = None) -> Path:
     cases = load_cases()
     if validate_only:
         return CASES
+    if case_ids is not None:
+        cases = [case for case in cases if case["id"] in case_ids]
+        missing = case_ids - {case["id"] for case in cases}
+        if missing:
+            raise ValueError(f"Casi non trovati: {sorted(missing)}")
     if not os.getenv("GROQ_API_KEY"):
         raise RuntimeError("GROQ_API_KEY è richiesto per le prove real-LLM")
     RESULTS.mkdir(parents=True, exist_ok=True)
@@ -153,5 +158,7 @@ def run(validate_only: bool = False) -> Path:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--validate-only", action="store_true")
+    parser.add_argument("--case-id", action="append", dest="case_ids",
+                        help="Esegue solo il caso indicato; ripetibile.")
     args = parser.parse_args()
-    print(run(args.validate_only))
+    print(run(args.validate_only, set(args.case_ids) if args.case_ids else None))

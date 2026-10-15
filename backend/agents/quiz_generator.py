@@ -11,6 +11,8 @@ from dotenv import load_dotenv
 
 from backend.agents.ingestor import retrieve_passages
 from backend.agents.groq_config import GROQ_MODEL, safe_groq_error
+from backend.agents.runtime_config import positive_int
+from backend.observability import run_agent
 from backend.agents.model_router import ModelChoice, fallback_choice, make_model, provider_name
 from backend.agents.llm_errors import LLM_TIMEOUT_SECONDS, MAX_LLM_ATTEMPTS, RetryableLLMError, is_rate_limit_error, is_retryable_error, provider_rate_limit_error, rate_limit_from_response, retry_delay
 from backend.agents.quality_controls import LLMJsonError, QuizPayload, parse_model_json, parse_json_object
@@ -25,10 +27,10 @@ PROMPT_VERSION = "quiz_generator_v1"
 PROMPT_PATH = Path(__file__).parent / "prompts" / f"{PROMPT_VERSION}.txt"
 DEFAULT_N_QUESTIONS = 5
 DEFAULT_N_CHUNKS = None
-MAX_QUIZ_CONTEXT_CHARS = 8000
-MAX_QUIZ_BATCHES = 6
-MAX_INVALID_QUIZ_ATTEMPTS = 2
-MAX_RECOVERY_QUIZ_CALLS = 2
+MAX_QUIZ_CONTEXT_CHARS = positive_int("QUIZ_MAX_CONTEXT_CHARS", 8000)
+MAX_QUIZ_BATCHES = positive_int("QUIZ_MAX_BATCHES", 6)
+MAX_INVALID_QUIZ_ATTEMPTS = positive_int("QUIZ_MAX_INVALID_ATTEMPTS", 2)
+MAX_RECOVERY_QUIZ_CALLS = positive_int("QUIZ_MAX_RECOVERY_CALLS", 2)
 DEFAULT_MODEL = GROQ_MODEL
 RETRY_DELAY = 3
 logger = logging.getLogger(__name__)
@@ -255,7 +257,7 @@ def generate_quiz(
             try:
                 agent = (_make_quiz_agent(None, choice=backup) if using_backup
                          else _make_quiz_agent(model_name))
-                output = agent.run(retry_prompt, stream=False)
+                output = run_agent(agent, retry_prompt, "quiz_generate")
                 raw = output.get_content_as_string()
                 failed = getattr(output, "status", None) == "ERROR"
                 active_provider = backup.provider.capitalize() if using_backup else provider_name("quiz")
@@ -347,7 +349,7 @@ def generate_quiz(
                 active_provider = backup.provider.capitalize() if using_backup else provider_name("quiz")
                 agent = (_make_quiz_agent(None, choice=backup) if using_backup
                          else _make_quiz_agent(model_name))
-                output = agent.run(recovery_prompt, stream=False)
+                output = run_agent(agent, recovery_prompt, "quiz_recovery")
                 raw = output.get_content_as_string()
                 failed = getattr(output, "status", None) == "ERROR"
                 rate_limit = rate_limit_from_response(raw, active_provider, run_failed=failed)

@@ -15,6 +15,8 @@ from sentence_transformers import SentenceTransformer
 from backend.db.models import Material, SessionLocal
 from backend.agents.upload_errors import upload_error
 from backend.agents.storage_errors import EmbeddingModelUnavailable, MaterialIndexUnavailable
+from backend.agents.runtime_config import positive_int, nonnegative_int
+from backend.observability import trace_event
 
 load_dotenv()
 
@@ -121,6 +123,9 @@ class LocalEmbeddingFunction(EmbeddingFunction):
     def name() -> str:
         # Chroma persists this identifier; keep it stable so old collections
         # can be opened and re-embedded using the model metadata below.
+        # Chroma persists this legacy function ID. Renaming it would make
+        # existing collections unreadable; the actual model is recorded in
+        # collection metadata and checked by get_collection().
         return "local-sentence-transformers-all-MiniLM-L6-v2"
 
     def get_config(self) -> dict:
@@ -162,8 +167,12 @@ def get_collection(student_id: int, exam_id: int) -> chromadb.Collection:
     return collection
 
 
-def chunk_text(text: str, chunk_size: int = 90, overlap: int = 15) -> list[str]:
+def chunk_text(text: str, chunk_size: int | None = None, overlap: int | None = None) -> list[str]:
     """Prefer paragraph and sentence ends; keep short passages below model limit."""
+    if chunk_size is None:
+        chunk_size = positive_int("RAG_CHUNK_WORDS", 90)
+    if overlap is None:
+        overlap = nonnegative_int("RAG_CHUNK_OVERLAP_WORDS", 15)
     if chunk_size <= 0 or overlap < 0 or overlap >= chunk_size:
         raise ValueError("chunk_size deve superare overlap e essere positivo")
     words = list(re.finditer(r"\S+", text))
@@ -478,6 +487,8 @@ def retrieve_chunks(
     if material_ids is not None:
         options["where"] = _material_where_clause(collection, exam_id, material_ids)
     results = collection.query(**options)
+    trace_event("retrieval", exam_id=exam_id, selected_sources=len(material_ids) if material_ids is not None else "all",
+                requested=n_results, returned=len((results.get("documents") or [[]])[0]))
     documents = results.get("documents")
     if not documents or not documents[0]:
         return []
@@ -579,6 +590,8 @@ def search_passages(
     if material_ids is not None:
         options["where"] = _material_where_clause(collection, exam_id, material_ids)
     rows = collection.query(**options)
+    trace_event("retrieval", exam_id=exam_id, selected_sources=len(material_ids) if material_ids is not None else "all",
+                requested=n_results, returned=len((rows.get("documents") or [[]])[0]))
     documents = (rows.get("documents") or [[]])[0]
     metadatas = (rows.get("metadatas") or [[]])[0]
     distances = (rows.get("distances") or [[]])[0]

@@ -20,6 +20,8 @@ from fpdf.enums import XPos, YPos
 
 from backend.agents.ingestor import retrieve_passages, search_passages
 from backend.agents.groq_config import GROQ_MODEL
+from backend.agents.runtime_config import positive_int
+from backend.observability import run_agent
 from backend.agents.model_router import make_model, provider_name
 from backend.agents.llm_errors import LLM_TIMEOUT_SECONDS, ModelServiceUnavailable, NotesReviewUnavailable, RetryableLLMError, is_rate_limit_error, is_retryable_error, provider_rate_limit_error, rate_limit_from_response
 from backend.agents.pdf_utils import pdf_text, register_unicode_fonts
@@ -35,14 +37,14 @@ PROMPT_PATH = Path(__file__).parent / "prompts" / f"{PROMPT_VERSION}.txt"
 DEFAULT_MODEL = GROQ_MODEL
 DEFAULT_N_CHUNKS = None
 RETRY_DELAY = 5
-MAX_LLM_ATTEMPTS = 4
-MAX_REVIEW_ATTEMPTS = 3
-MAX_BACKOFF_SECONDS = 60
+MAX_LLM_ATTEMPTS = positive_int("NOTES_MAX_LLM_ATTEMPTS", 4)
+MAX_REVIEW_ATTEMPTS = positive_int("NOTES_MAX_REVIEW_ATTEMPTS", 3)
+MAX_BACKOFF_SECONDS = positive_int("NOTES_MAX_BACKOFF_SECONDS", 60)
 RETRY_SAFETY_MARGIN = 1.0
-MAX_COMPLETION_TOKENS = 2048
-MAX_REVIEW_TOKENS = 4096
-MAX_CONTEXT_CHARS = 10000
-MAX_CHUNK_CHARS = 1200
+MAX_COMPLETION_TOKENS = positive_int("NOTES_MAX_COMPLETION_TOKENS", 2048)
+MAX_REVIEW_TOKENS = positive_int("NOTES_MAX_REVIEW_TOKENS", 4096)
+MAX_CONTEXT_CHARS = positive_int("NOTES_MAX_CONTEXT_CHARS", 10000)
+MAX_CHUNK_CHARS = positive_int("NOTES_MAX_CHUNK_CHARS", 1200)
 
 # Margini PDF (in mm)
 LEFT_MARGIN = 18
@@ -397,7 +399,7 @@ def _verify_notes_fidelity(notes: str, source_context: str, model_name: str) -> 
     review_prompt = prompt
     for attempt in range(1, MAX_REVIEW_ATTEMPTS + 1):
         try:
-            output = agent.run(review_prompt, stream=False)
+            output = run_agent(agent, review_prompt, "notes_review")
             response = output.get_content_as_string()
             if getattr(output, "status", None) == "ERROR" or (response and _is_error_response(response)):
                 raise _response_error(response)
@@ -518,7 +520,7 @@ def _run_with_retry(agent: Agent, prompt: str, source_context: str = "") -> str:
         model = getattr(getattr(agent, "model", None), "id", DEFAULT_MODEL)
         print(f"[NotesGenerator] modello={model} tentativo={attempt}/{MAX_LLM_ATTEMPTS} motivo={last_reason}")
         try:
-            output = agent.run(current_prompt, stream=False)
+            output = run_agent(agent, current_prompt, "notes_generate")
             response = output.get_content_as_string().strip()
             if getattr(output, "status", None) == "ERROR" or _is_error_response(response):
                 raise _response_error(response)

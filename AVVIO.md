@@ -6,7 +6,8 @@ Per la descrizione aggiornata dei flussi, del contatore di sessione e delle modi
 
 - Python >= 3.13
 - [uv](https://docs.astral.sh/uv/)
-- Un file `.env` nella root con le chiavi dei provider AI selezionati (copia `.env.example`)
+- Un file `.env` nella root con le sole chiavi dei provider AI selezionati (copia `.env.example`)
+- Le impostazioni non segrete sono in `config/app.toml`; non occorre copiarlo
 
 ## Installazione
 
@@ -45,7 +46,9 @@ git diff --check
 
 ## Note operative
 
-Il modello di embedding si carica al primo utilizzo. Il primo download può richiedere tempo. Le pagine PDF senza testo estraibile passano all'OCR locale. `MAX_UPLOAD_BYTES` limita la dimensione dei PDF. `CORS_ORIGINS` serve solo a eventuali client API su origini diverse: la UI inclusa è servita dallo stesso host di FastAPI.
+Il modello di embedding si carica al primo utilizzo. Il primo download può richiedere tempo. Le pagine PDF senza testo estraibile passano all'OCR locale. `MAX_UPLOAD_BYTES` limita la dimensione dei PDF. `CORS_ORIGINS` serve solo a eventuali client API su origini diverse: la UI inclusa è servita dallo stesso host di FastAPI. Queste opzioni sono in `config/app.toml`, non nel modello `.env.example`.
+
+Ogni risposta HTTP include `X-Request-ID`. Nei log del server lo stesso ID collega durata della richiesta, ricerca nell'indice e chiamate al modello; i log non contengono prompt, risposte degli studenti o brani dei PDF. Le opzioni `RAG_CHUNK_WORDS`, `RAG_CHUNK_OVERLAP_WORDS`, `QUIZ_MAX_*` e `NOTES_MAX_*` sono definite in `config/app.toml`. Le variabili d'ambiente già impostate hanno precedenza sui valori del file, anche per i test e le installazioni esistenti. Cambiare il chunking richiede di reindicizzare le fonti, perché modifica i confini dei brani salvati. Non cambiare l'identificatore legacy della funzione di embedding: Chroma lo usa per aprire collezioni già esistenti; il modello effettivo è salvato e verificato nei metadati.
 
 I PDF con riferimenti interni difettosi possono essere letti da `pypdf` con recupero parziale: il server registra un solo riepilogo per file e mostra nell'interfaccia quante pagine hanno testo. Se mancano pagine, conviene esportare nuovamente il PDF dalla fonte originale. L'avviso Hugging Face sulle richieste senza `HF_TOKEN` riguarda i limiti del download del modello e non indica un errore di indicizzazione.
 
