@@ -18,7 +18,6 @@ def test_each_feature_uses_its_configured_provider(monkeypatch):
     monkeypatch.setenv("NOTES_MODEL", "gemini-3.5-flash")
     monkeypatch.setenv("MISTRAL_API_KEY", "test-mistral-key")
     monkeypatch.setenv("GEMINI_API_KEY", "test-gemini-key")
-    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
     for module in (socratic_tutor, quiz_generator, notes_generator):
         monkeypatch.setattr(module, "Agent", lambda **kwargs: SimpleNamespace(**kwargs))
 
@@ -51,7 +50,6 @@ def test_missing_provider_key_has_safe_configuration_error(monkeypatch):
         model_router.make_model("quiz")
 
     monkeypatch.setenv("NOTES_PROVIDER", "gemini")
-    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     with pytest.raises(model_router.ModelConfigurationError, match="GOOGLE_API_KEY"):
         model_router.make_model("notes")

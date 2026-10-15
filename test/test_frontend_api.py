@@ -108,7 +108,11 @@ def test_session_detail_interrupt_resume_notes_and_delete(api_client, monkeypatc
     assert detail.json()["attempts"][0]["student_answer_1"] == "Una spinta"
     assert detail.json()["material_ids"] == [7]
 
-    monkeypatch.setattr(session_extras, "generate_notes_from_log", lambda attempts, **kwargs: "# Appunti")
+    def generate_session_notes(attempts, **kwargs):
+        assert kwargs["material_ids"] == [7]
+        return "# Appunti"
+
+    monkeypatch.setattr(session_extras, "generate_notes_from_log", generate_session_notes)
     assert api_client.post(f"/sessions/{session_id}/notes").json()["notes"] == "# Appunti"
     assert api_client.post(f"/sessions/{session_id}/interrupt").status_code == 200
     assert api_client.get(f"/sessions/{session_id}/detail").json()["status"] == "interrotta"
@@ -185,7 +189,8 @@ def test_selected_exam_notes_pdf_and_reindex_use_existing_services(api_client, m
 
     class FakeCollection:
         def get(self, **kwargs):
-            return {"ids": ["old-chunk"]}
+            return {"ids": ["old-chunk"], "documents": ["Testo precedente"],
+                    "metadatas": [{"file_hash": "oldhash"}]}
 
         def delete(self, **kwargs):
             seen.append(kwargs["ids"][0])
@@ -199,6 +204,104 @@ def test_selected_exam_notes_pdf_and_reindex_use_existing_services(api_client, m
     assert "old-chunk" in seen
     with SessionLocal() as db:
         assert db.get(Material, material_id).chunks_count == 3
+
+
+def test_reindex_restores_previous_chunks_when_ingestion_fails(api_client, monkeypatch, tmp_path):
+    student_id, exam_id = _account_and_exam(api_client)
+    pdf_path = tmp_path / "source.pdf"
+    pdf_path.write_bytes(b"%PDF-test")
+    with SessionLocal() as db:
+        material = Material(exam_id=exam_id, filename="source.pdf", stored_path=str(pdf_path),
+                            file_hash="oldhash", pages_count=1, chunks_count=1)
+        db.add(material)
+        db.commit()
+        material_id = material.id
+
+    class FakeCollection:
+        def __init__(self):
+            self.rows = {"old-chunk": ("Testo precedente", {"file_hash": "oldhash"})}
+
+        def get(self, **kwargs):
+            ids = [key for key, (_, meta) in self.rows.items()
+                   if all(meta.get(field) == value for field, value in kwargs["where"].items())]
+            return {"ids": ids, "documents": [self.rows[key][0] for key in ids],
+                    "metadatas": [self.rows[key][1] for key in ids]}
+
+        def delete(self, *, ids):
+            for key in ids:
+                self.rows.pop(key)
+
+        def add(self, *, ids, documents, metadatas):
+            for key, document, metadata in zip(ids, documents, metadatas):
+                self.rows[key] = (document, metadata)
+
+    collection = FakeCollection()
+    monkeypatch.setattr(frontend_extras, "get_collection", lambda *args: collection)
+    monkeypatch.setattr(frontend_extras, "ingest_pdf", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("ingestion failed")))
+
+    response = api_client.post(f"/exams/{exam_id}/reindex", params={"student_id": student_id})
+    assert response.status_code == 500
+    assert collection.rows == {"old-chunk": ("Testo precedente", {"file_hash": "oldhash"})}
+    with SessionLocal() as db:
+        stored = db.get(Material, material_id)
+        assert stored.file_hash == "oldhash"
+        assert stored.chunks_count == 1
+
+
+def test_reindex_restores_previous_chunks_when_db_commit_fails(api_client, monkeypatch, tmp_path):
+    student_id, exam_id = _account_and_exam(api_client)
+    pdf_path = tmp_path / "source.pdf"
+    pdf_path.write_bytes(b"%PDF-test")
+    with SessionLocal() as db:
+        material = Material(exam_id=exam_id, filename="source.pdf", stored_path=str(pdf_path),
+                            file_hash="oldhash", pages_count=1, chunks_count=1)
+        db.add(material)
+        db.commit()
+        material_id = material.id
+
+    rows = {"old-chunk": ("Testo precedente", {"file_hash": "oldhash"})}
+
+    class FakeCollection:
+        def get(self, *, where, **kwargs):
+            ids = [key for key, (_, meta) in rows.items()
+                   if all(meta.get(field) == value for field, value in where.items())]
+            return {"ids": ids, "documents": [rows[key][0] for key in ids],
+                    "metadatas": [rows[key][1] for key in ids]}
+
+        def delete(self, *, ids):
+            for key in ids:
+                rows.pop(key)
+
+        def add(self, *, ids, documents, metadatas):
+            for key, document, metadata in zip(ids, documents, metadatas):
+                assert key not in rows
+                rows[key] = (document, metadata)
+
+    collection = FakeCollection()
+    monkeypatch.setattr(frontend_extras, "get_collection", lambda *args: collection)
+
+    def ingest(*args, **kwargs):
+        collection.add(ids=["new-chunk"], documents=["Testo nuovo"],
+                       metadatas=[{"file_hash": "newhash"}])
+        return {"file_hash": "newhash", "chunks": 1, "pages": 1,
+                "pages_with_text": 1, "pages_skipped": 0}
+
+    monkeypatch.setattr(frontend_extras, "ingest_pdf", ingest)
+    original_factory = frontend_extras.SessionLocal
+
+    def failing_factory():
+        db = original_factory()
+        db.commit = lambda: (_ for _ in ()).throw(OSError("database unavailable"))
+        return db
+
+    monkeypatch.setattr(frontend_extras, "SessionLocal", failing_factory)
+    response = api_client.post(f"/exams/{exam_id}/reindex", params={"student_id": student_id})
+    assert response.status_code == 500
+    assert rows == {"old-chunk": ("Testo precedente", {"file_hash": "oldhash"})}
+    with SessionLocal() as db:
+        stored = db.get(Material, material_id)
+        assert stored.file_hash == "oldhash"
+        assert stored.chunks_count == 1
 
 
 def test_report_download_and_regeneration(api_client, monkeypatch, tmp_path):

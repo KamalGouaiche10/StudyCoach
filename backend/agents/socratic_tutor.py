@@ -763,7 +763,7 @@ class SocraticTutor:
 
         print(
             f"[ContestationAgent] {contest_result.contestation_assessment} | "
-            f"{attempt.evaluation.score} → {contest_result.final_score} | q_id={attempt.question_id}"
+            f"{attempt.evaluation.score} -> {contest_result.final_score} | q_id={attempt.question_id}"
         )
         return {
             "final_score": contest_result.final_score,

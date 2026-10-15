@@ -762,3 +762,22 @@ def test_retry_limit_prevents_infinite_validation_loop(monkeypatch):
     with pytest.raises(RuntimeError, match="validazione non superata"):
         ng._run_with_retry(agent, "prompt")
     assert agent.calls == ng.MAX_LLM_ATTEMPTS
+
+
+def test_session_notes_rag_uses_selected_materials(monkeypatch):
+    seen = []
+
+    def search(query, student_id, exam_id, **kwargs):
+        seen.append(kwargs["material_ids"])
+        return [{"text": "Fonte selezionata", "source": "scelta.pdf", "page": 1}]
+
+    monkeypatch.setattr(ng, "search_passages", search)
+    monkeypatch.setattr(ng, "_make_notes_agent", lambda *_: object())
+    monkeypatch.setattr(ng, "_run_with_retry", lambda *args, **kwargs: "## Appunti\nFonte selezionata")
+
+    result = ng.generate_notes_from_log(
+        [{"question_text": "Che cosa studia?", "topic_hint": "tema", "final_score": 5}],
+        student_id=1, exam_id=2, enrich_with_rag=True, material_ids=[7],
+    )
+    assert "Fonte selezionata" in result
+    assert seen == [[7]]

@@ -377,6 +377,34 @@ def test_tutor_answer1_without_start_returns_404(api_client):
     assert resp.status_code == 404
 
 
+@pytest.mark.parametrize("session_status", ["interrotta", "completata"])
+def test_tutor_start_requires_active_session(api_client, session_status):
+    from backend.db.models import Exam
+
+    student_id = api_client.post(
+        "/auth/register", json={"username": "inactive_user", "email": "inactive@example.com",
+                                "password": "secret123", "password_confirm": "secret123"},
+    ).json()["student_id"]
+    question = {"id": 1, "text": "Domanda?", "difficulty": "base", "topic_hint": "tema"}
+    with SessionLocal() as db:
+        exam = Exam(student_id=student_id, name="Fisica")
+        db.add(exam)
+        db.flush()
+        session = DbSession(exam_id=exam.id, student_id=student_id, status=session_status,
+                            quiz_json=json.dumps({"questions": [question]}))
+        db.add(session)
+        db.commit()
+        session_id = session.id
+
+    response = api_client.post(
+        f"/sessions/{session_id}/tutor/start", params={"student_id": student_id},
+        json={"session_id": session_id, "question": question},
+    )
+    assert response.status_code == 409
+    with SessionLocal() as db:
+        assert db.get(DbSession, session_id).current_turn_json is None
+
+
 def test_tutor_answer2_before_answer1_returns_409(api_client, sample_pdf_path, monkeypatch, fake_agent_factory):
     student_id, exam_id = _setup_exam_with_material(api_client, sample_pdf_path)
     session_id = api_client.post(

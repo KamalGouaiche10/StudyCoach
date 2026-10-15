@@ -96,21 +96,38 @@ def reindex_materials(exam_id: int, student_id: int) -> dict:
             if not path.exists():
                 raise HTTPException(status_code=409, detail=f"File mancante: {material.filename}")
             collection = get_collection(student_id, exam_id)
-            old = collection.get(where={"file_hash": material.file_hash}) if material.file_hash else collection.get(where={"source_file": path.name})
-            if old.get("ids"):
-                collection.delete(ids=old["ids"])
+            old_where = {"file_hash": material.file_hash} if material.file_hash else {"source_file": material.filename}
+            old = collection.get(where=old_where, include=["documents", "metadatas"])
+            stats = None
             try:
+                if old.get("ids"):
+                    collection.delete(ids=old["ids"])
                 stats = ingest_pdf(str(path), student_id, exam_id, source_file=material.filename)
+                stored = db.get(Material, material.id)
+                stored.file_hash = stats.get("file_hash")
+                stored.chunks_count = stats.get("chunks", 0)
+                stored.pages_count = stats.get("pages", 0)
+                stored.pages_with_text = stats.get("pages_with_text", 0)
+                stored.pages_skipped = stats.get("pages_skipped", 0)
+                db.commit()
             except Exception as exc:
                 logger.exception("Reindex failed for material %s", material.id)
+                db.rollback()
+                try:
+                    if stats is not None:
+                        new_ids = collection.get(where={"file_hash": stats["file_hash"]}).get("ids") or []
+                        if new_ids:
+                            collection.delete(ids=new_ids)
+                    if old.get("ids"):
+                        collection.add(ids=old["ids"], documents=old["documents"],
+                                       metadatas=old["metadatas"])
+                except Exception as restore_exc:
+                    logger.exception("Failed to restore index for material %s", material.id)
+                    raise HTTPException(
+                        status_code=500,
+                        detail="Reindicizzazione fallita e indice precedente non ripristinato. Verifica i materiali.",
+                    ) from restore_exc
                 raise HTTPException(status_code=500, detail=public_error(exc, "Reindicizzazione fallita. Riprova.")) from exc
-            stored = db.get(Material, material.id)
-            stored.file_hash = stats.get("file_hash")
-            stored.chunks_count = stats.get("chunks", 0)
-            stored.pages_count = stats.get("pages", 0)
-            stored.pages_with_text = stats.get("pages_with_text", 0)
-            stored.pages_skipped = stats.get("pages_skipped", 0)
-            db.commit()
     return verify_exam_material(student_id, exam_id)
 
 

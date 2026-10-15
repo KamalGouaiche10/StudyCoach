@@ -1,5 +1,6 @@
 
 import json
+import logging
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -43,6 +44,7 @@ from backend.models.schemas import (
 )
 
 router = APIRouter(prefix="/sessions", tags=["sessions"], dependencies=[Depends(require_api_owner)])
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # In-memory store per tutor e adaptive engine attivi
@@ -308,6 +310,8 @@ def tutor_start(
 ) -> TutorStartResponse:
     """Inizializza il SocraticTutor e fa il pre-fetch dei chunk RAG."""
     sess = _get_session_or_404(session_id)
+    if sess.status != "in_corso":
+        raise HTTPException(status_code=409, detail="Riprendi la sessione prima di avviare una domanda.")
     quiz = json.loads(sess.quiz_json or "{}")
     canonical = next((question for question in quiz.get("questions", [])
                       if question.get("id") == payload.question.id), None)
@@ -435,8 +439,10 @@ def tutor_contest(session_id: int, payload: ContestRequest) -> ContestResponse:
         data = tutor.submit_contestation(payload.argumentation)
         _persist_turn(session_id, tutor)
     except RuntimeError as exc:
+        logger.exception("Contestazione fallita per la sessione %s", session_id)
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Turno non disponibile. Ricarica la sessione.") from exc
     except Exception as exc: # pylint: disable=broad-exception-caught
+        logger.exception("Riesame fallito per la sessione %s", session_id)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Impossibile rivalutare la risposta. Riprova.",

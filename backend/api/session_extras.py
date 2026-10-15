@@ -114,11 +114,13 @@ def delete_incomplete_session(session_id: int) -> Response:
 def session_notes(session_id: int) -> dict:
     session = _session(session_id)
     attempts = json.loads(session.qa_log or "[]")
+    material_ids = json.loads(session.quiz_json or "{}").get("material_ids")
     if not attempts:
         raise HTTPException(status_code=409, detail="Nessuna risposta disponibile per gli appunti.")
     try:
         notes = generate_notes_from_log(attempts, student_id=session.student_id,
-                                        exam_id=session.exam_id, enrich_with_rag=True)
+                                        exam_id=session.exam_id, enrich_with_rag=True,
+                                        material_ids=material_ids)
     except Exception as exc:
         logger.exception("Session notes generation failed")
         raise HTTPException(status_code=500, detail=public_error(exc, "Impossibile generare gli appunti. Riprova.")) from exc

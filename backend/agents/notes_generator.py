@@ -1007,6 +1007,7 @@ def generate_notes_from_log(
         source_name: str = "sessione di studio",
         model_name: str | None = None,
         enrich_with_rag: bool = False,
+        material_ids: list[int] | None = None,
 ) -> str:
     if not attempts:
         raise ValueError("Lista attempts vuota")
@@ -1020,7 +1021,8 @@ def generate_notes_from_log(
         query = " ".join(weak_topics[:3]) or " ".join(
             str(item.get("question_text", "")) for item in attempts[:3]
         )
-        rag_passages = search_passages(query, student_id, exam_id, n_results=6)
+        rag_passages = search_passages(query, student_id, exam_id, n_results=6,
+                                       material_ids=material_ids)
         rag_context = "\n\n".join(_passage_contexts(rag_passages))
 
     template = _load_prompt_template()

@@ -148,6 +148,68 @@ def test_selected_material_queries_exclude_other_pdfs(tmp_path):
         ingestor.retrieve_passages(student_id, exam_id, material_ids=[999999])
 
 
+def test_two_real_pdfs_match_index_and_tutor_retrieval(tmp_path):
+    """Check PDF bytes, indexed text, and the tutor's selected-source path together."""
+    from fpdf import FPDF
+
+    from backend.agents.socratic_tutor import SocraticTutor
+    from backend.db.models import Exam, Student
+
+    with SessionLocal() as db:
+        student = Student(username="two_pdf_audit", password_hash="hash")
+        db.add(student)
+        db.flush()
+        exam = Exam(student_id=student.id, name="Due dispense")
+        db.add(exam)
+        db.commit()
+        student_id, exam_id = student.id, exam.id
+
+    sources = (
+        ("bayes.pdf", "Il teorema di Bayes aggiorna la probabilita usando una evidenza osservata."),
+        ("matrici.pdf", "Il prodotto tra matrici combina trasformazioni lineari compatibili."),
+    )
+    material_ids = []
+    hashes = []
+    for filename, sentence in sources:
+        path = tmp_path / filename
+        pdf = FPDF()
+        pdf.add_page()
+        pdf.set_font("Helvetica", size=12)
+        pdf.multi_cell(0, 8, sentence * 4)
+        pdf.output(str(path))
+        stats = ingestor.ingest_pdf(str(path), student_id, exam_id)
+        assert stats["chunks"] > 0
+        hashes.append(stats["file_hash"])
+        with SessionLocal() as db:
+            material = Material(
+                exam_id=exam_id, filename=filename, stored_path=str(path),
+                file_hash=stats["file_hash"], chunks_count=stats["chunks"],
+            )
+            db.add(material)
+            db.commit()
+            material_ids.append(material.id)
+
+    collection = ingestor.get_collection(student_id, exam_id)
+    assert len(set(hashes)) == 2
+    for (filename, sentence), file_hash in zip(sources, hashes):
+        rows = collection.get(where={"file_hash": file_hash}, include=["documents", "metadatas"])
+        assert rows["ids"]
+        assert len(rows["ids"]) == len(set(rows["ids"]))
+        assert sentence in " ".join(rows["documents"])
+        assert all(metadata["file_hash"] == file_hash for metadata in rows["metadatas"])
+    assert collection.count() == sum(
+        len(collection.get(where={"file_hash": file_hash})["ids"]) for file_hash in hashes
+    )
+    assert ingestor.verify_exam_material(student_id, exam_id)["ok"]
+
+    for material_id, (filename, sentence) in zip(material_ids, sources):
+        tutor = SocraticTutor(student_id, exam_id, material_ids=[material_id])
+        tutor.start({"id": filename, "text": sentence})
+        assert tutor._source_cache
+        assert all(passage["source"] == filename for passage in tutor._source_cache)
+        assert sentence in " ".join(passage["text"] for passage in tutor._source_cache)
+
+
 def test_get_collection_reembeds_legacy_vectors(isolated_chroma, monkeypatch):
     with monkeypatch.context() as patch:
         patch.setattr(
