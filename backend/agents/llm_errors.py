@@ -52,8 +52,6 @@ def rate_limit_from_response(text: str, provider: str = "Groq", *, run_failed: b
     try:
         payload = json.loads(text)
     except (TypeError, ValueError):
-        # Some SDKs put a structured HTTP error after a human-readable prefix.
-        # Only inspect it when Agno has marked the run as failed.
         if not run_failed or not isinstance(text, str) or "{" not in text:
             return None
         try:
@@ -85,7 +83,6 @@ def rate_limit_from_response(text: str, provider: str = "Groq", *, run_failed: b
 
 
 def is_rate_limit_error(error: BaseException | None) -> bool:
-    """Return True only for an HTTP 429 exposed by the client exception."""
     if error is None:
         return False
     response = getattr(error, "response", None)

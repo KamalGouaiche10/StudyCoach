@@ -82,8 +82,6 @@ def make_model(feature: str, model_name: str | None = None, *, max_tokens: int |
         from agno.models.mistral import MistralChat
         from mistralai import Mistral
 
-        # Agno 2.6.5 passes a legacy `timeout` argument that the Mistral SDK
-        # does not accept. Supply a configured client through Agno's public hook.
         client = Mistral(api_key=api_key, timeout_ms=int(LLM_TIMEOUT_SECONDS * 1000))
         params = {"id": choice.model_id, "mistral_client": client}
         if max_tokens is not None:

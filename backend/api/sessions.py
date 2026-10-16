@@ -48,7 +48,6 @@ logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # In-memory store per tutor e adaptive engine attivi
-
 # ---------------------------------------------------------------------------
 
 def _engine_from_session(sess: DbSession, *, include_unreliable: bool = False) -> AdaptiveEngine:

@@ -35,7 +35,7 @@ async def lifespan(_app: FastAPI):
 app = FastAPI(
     title="Study Coach API",
     description=(
-        "API per il tutor AI universitario basato su RAG + Groq. "
+        "API per il tutor AI universitario basato su RAG. "
         "Supporta autenticazione studenti, gestione esami, "
         "indicizzazione PDF, generazione quiz e loop socratico adattivo."
     ),

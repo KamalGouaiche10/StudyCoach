@@ -18,9 +18,7 @@ from dotenv import load_dotenv
 from backend.agents.ingestor import search_passages
 from backend.agents.groq_config import GROQ_MODEL, safe_groq_error
 from backend.agents.model_router import make_model
-from backend.agents.llm_errors import (
-    LLM_TIMEOUT_SECONDS, MAX_LLM_ATTEMPTS, is_retryable_error, retry_delay,
-)
+from backend.agents.llm_errors import (MAX_LLM_ATTEMPTS, is_retryable_error, retry_delay)
 from backend.agents.evaluation_validator import validate_contestation, validate_evaluation
 from backend.agents.quality_controls import add_citations, delimit_contestation, is_spoiler, rubric_score, parse_json_object
 from backend.observability import run_agent
@@ -325,9 +323,7 @@ def _apply_consistency_guardrails(
     come corretti e nessun punto mancante, ma assegna comunque un voto
     parziale in modo incoerente.
     """
-    # A missing field is not equivalent to an explicitly empty list.  In
-    # particular, never upgrade a score based on a value fabricated by the
-    # parser's fallback (``data.get(..., [])``).
+   
     if not missing_points_present or evaluation.score >= 9:
         return evaluation
     if not _has_no_real_gaps(evaluation.missing_points):
