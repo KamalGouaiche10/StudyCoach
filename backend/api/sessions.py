@@ -589,8 +589,9 @@ def next_question(session_id: int, payload: NextQuestionRequest) -> NextQuestion
 def close_session(session_id: int, payload: SessionCloseRequest) -> SessionReportResponse:
     sess = _get_session_or_404(session_id)
     engine = _engine_from_session(sess, include_unreliable=True)
-
     report = engine.generate_session_report()
+    if not report["n_questions_answered"]:
+        raise HTTPException(status_code=409, detail="Completa almeno una domanda prima di chiudere la sessione.")
     snapshot = report_snapshot(report["student_id"], report["exam_id"], session_id)
     paths = save_report(report, session_id, payload.exam_name)
 

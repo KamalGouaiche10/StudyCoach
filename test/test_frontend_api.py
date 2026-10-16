@@ -315,9 +315,14 @@ def test_report_download_and_regeneration(api_client, monkeypatch, tmp_path):
         session_id = session.id
     pdf_path = tmp_path / "report.pdf"
     pdf_path.write_bytes(b"%PDF-report")
+    captured = {}
     monkeypatch.setattr(session_extras, "report_snapshot", lambda *args: {})
-    monkeypatch.setattr(session_extras, "save_report", lambda *args: {"pdf": str(pdf_path)})
+    def save_report(report, *_args):
+        captured.update(report)
+        return {"pdf": str(pdf_path)}
+    monkeypatch.setattr(session_extras, "save_report", save_report)
     regenerated = api_client.post(f"/sessions/{session_id}/report/regenerate")
     assert regenerated.status_code == 200
+    assert captured["strong_topics"] == []  # A score of 7 is sufficient, not mastered.
     assert api_client.get(f"/sessions/{session_id}/report").content == b"%PDF-report"
     assert api_client.get(f"/sessions/{session_id}").json()["report_available"] is True

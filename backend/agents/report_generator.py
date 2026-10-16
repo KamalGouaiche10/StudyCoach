@@ -9,6 +9,14 @@ from backend.agents.pdf_utils import pdf_text, register_unicode_fonts
 REPORTS_DIR = Path(__file__).parent.parent.parent / "reports"
 
 
+def _topic_status(topic: dict) -> str:
+    if topic["is_weak"]:
+        return "Da rivedere"
+    if topic["avg_score"] >= 8:
+        return "Padroneggiato"
+    return "Sufficiente"
+
+
 # ---------------------------------------------------------------------------
 # Markdown
 # ---------------------------------------------------------------------------
@@ -36,7 +44,7 @@ def generate_markdown(report: dict,session_id: int,exam_name: str = "Esame",) ->
         f"",f"| Argomento | Media | Tentativi | Stato |",f"|---|---|---|---|",]
 
     for t in breakdown:
-        stato = "❌ Da rivedere" if t["is_weak"] else "✅ Padroneggiato"
+        stato = f"{'❌' if t['is_weak'] else '✅' if t['avg_score'] >= 8 else '🟡'} {_topic_status(t)}"
         lines.append(f"| {t['topic']} | {t['avg_score']}/10 | {t['n_attempts']} | {stato} |")
 
     lines += [ f"", f"---", f"", f"## Aree da Rivedere", f"",]
@@ -162,9 +170,11 @@ def generate_pdf( report: dict, session_id: int, exam_name: str = "Esame",) -> b
 
     pdf.set_font("Arial", "", 10)
     for t in breakdown:
-        stato = "Da rivedere" if t["is_weak"] else "Padroneggiato"
+        stato = _topic_status(t)
         if t["is_weak"]:
             pdf.set_text_color(180, 0, 0)
+        elif t["avg_score"] < 8:
+            pdf.set_text_color(150, 110, 0)
         else:
             pdf.set_text_color(0, 130, 0)
         pdf.cell(90, 6, pdf_text(str(t["topic"])[:45]), border=1)

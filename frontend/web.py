@@ -213,7 +213,7 @@ async def login(request: Request):
     form = await request.form()
     response = _redirect("/web/exams")
     try:
-        auth.login(LoginRequest(username=str(form.get("username", "")), password=str(form.get("password", ""))), response)
+        auth.login(LoginRequest(username=str(form.get("username", "")), password=str(form.get("password", ""))), response, request)
         return response
     except (HTTPException, ValidationError) as exc:
         return _error("/web/login", exc)

@@ -138,6 +138,14 @@ def test_generate_session_report_empty_session():
     assert "Nessuna domanda completata" in report["summary"]
 
 
+def test_sufficient_topic_is_not_reported_as_mastered():
+    engine = AdaptiveEngine(student_id=1, exam_id=1)
+    engine.record_answer(question_id=1, topic="tema", score=6)
+    report = engine.generate_session_report()
+    assert report["weak_topics"] == []
+    assert report["strong_topics"] == []
+
+
 # ---------------------------------------------------------------------------
 # _build_summary
 # ---------------------------------------------------------------------------

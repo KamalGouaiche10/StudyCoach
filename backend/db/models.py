@@ -23,6 +23,14 @@ class Student(Base):
     created_at    = Column(DateTime(timezone=True), default=now_utc)
     exams         = relationship("Exam", back_populates="student", cascade="all, delete")
 
+
+class LoginAttempt(Base):
+    __tablename__ = "login_attempts"
+    scope_key = Column(String(64), primary_key=True)
+    failures = Column(Integer, nullable=False)
+    window_started = Column(Float, nullable=False)
+    blocked_until = Column(Float, nullable=False, default=0.0)
+
 class Exam(Base):
     __tablename__ = "exams"
     id         = Column(Integer, primary_key=True)

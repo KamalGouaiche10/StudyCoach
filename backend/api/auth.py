@@ -5,6 +5,7 @@ from sqlalchemy.exc import IntegrityError
 from backend.db.models import SessionLocal, Student, init_db
 from backend.models.schemas import AuthResponse, LoginRequest, RegisterRequest
 from backend.security import hash_password, verify_password
+from backend.login_limiter import retry_after, record_failure, clear_account
 from backend.session_cookie import COOKIE_NAME, COOKIE_MAX_AGE, get_or_create_token, invalidate_token, verify_token
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -107,21 +108,24 @@ def register(payload: RegisterRequest, response: Response) -> AuthResponse:
     response_model=AuthResponse,
     summary="Login studente",
 )
-def login(payload: LoginRequest, response: Response) -> AuthResponse:
+def login(payload: LoginRequest, response: Response, request: Request) -> AuthResponse:
     """
     Verifica le credenziali e crea un cookie di sessione HttpOnly.
     """
-    student = _get_student_by_username(payload.username.strip())
-    if not student:
+    username = payload.username.strip()
+    origin = request.client.host if request.client else "unknown"
+    wait = retry_after(username, origin)
+    if wait:
+        raise HTTPException(status_code=429, detail="Troppi tentativi di accesso. Riprova più tardi.",
+                            headers={"Retry-After": str(wait)})
+    student = _get_student_by_username(username)
+    if not student or not verify_password(payload.password, student.password_hash):
+        record_failure(username, origin)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Credenziali non valide.",
         )
-    if not verify_password(payload.password, student.password_hash):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Credenziali non valide.",
-        )
+    clear_account(username, origin)
     token = get_or_create_token(student.id)
     response.set_cookie(COOKIE_NAME, token, max_age=COOKIE_MAX_AGE, httponly=True, samesite="lax")
     return AuthResponse(

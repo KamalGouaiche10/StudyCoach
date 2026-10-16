@@ -488,6 +488,34 @@ def test_close_session_without_engine_returns_404(api_client):
     assert resp.status_code == 404
 
 
+def test_close_session_without_answers_does_not_store_zero_score(api_client):
+    from backend.db.models import Exam
+
+    student_id = api_client.post("/auth/register", json={
+        "username": "empty_user", "email": "empty@example.com",
+        "password": "secret123", "password_confirm": "secret123",
+    }).json()["student_id"]
+    with SessionLocal() as db:
+        exam = Exam(student_id=student_id, name="Esame")
+        db.add(exam)
+        db.flush()
+        session = DbSession(exam_id=exam.id, student_id=student_id, status="in_corso", qa_log="[]")
+        db.add(session)
+        db.commit()
+        exam_id, session_id = exam.id, session.id
+
+    response = api_client.post(f"/sessions/{session_id}/close", json={
+        "session_id": session_id, "exam_name": "Esame",
+    })
+    assert response.status_code == 409
+    with SessionLocal() as db:
+        stored = db.get(DbSession, session_id)
+        assert stored.score_total is None
+        assert stored.status == "in_corso"
+    exams = api_client.get("/exams", params={"student_id": student_id}).json()["exams"]
+    assert next(exam for exam in exams if exam["id"] == exam_id)["avg_score"] is None
+
+
 def test_next_question_without_engine_returns_404(api_client):
     api_client.post("/auth/register", json={"username": "missing_user", "email": "missing_user@example.com", "password": "secret123", "password_confirm": "secret123"})
     resp = api_client.post("/sessions/999999/next-question", json={
@@ -513,7 +541,7 @@ def test_close_session_db_failure_removes_new_reports(api_client, sample_pdf_pat
     ).json()["id"]
     report = {
         "student_id": student_id, "exam_id": exam_id, "overall_avg": 7.0,
-        "n_questions_answered": 0, "weak_topics": [], "strong_topics": [],
+        "n_questions_answered": 1, "weak_topics": [], "strong_topics": [],
         "topic_breakdown": [], "summary": "Sessione conclusa.",
     }
     monkeypatch.setattr(sessions_api, "_engine_from_session", lambda sess, **_kwargs: SimpleNamespace(generate_session_report=lambda: report))

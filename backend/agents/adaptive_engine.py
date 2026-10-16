@@ -51,7 +51,7 @@ class SessionStats:
 
     @property
     def strong_topics(self) -> list[str]:
-        return [t for t, s in self.topic_stats.items() if not s.is_weak]
+        return [t for t, s in self.topic_stats.items() if s.avg_score >= 8]
 
 
 # ---------------------------------------------------------------------------

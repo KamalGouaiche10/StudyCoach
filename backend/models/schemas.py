@@ -22,6 +22,13 @@ class RegisterRequest(BaseModel):
     password: str = Field(..., min_length=6, examples=["secret123"])
     password_confirm: str = Field(..., min_length=6, exclude=True)
 
+    @field_validator("password", "password_confirm")
+    @classmethod
+    def password_fits_bcrypt(cls, value: str) -> str:
+        if len(value.encode("utf-8")) > 72:
+            raise ValueError("La password non può superare 72 byte UTF-8.")
+        return value
+
     @field_validator("username")
     @classmethod
     def username_strip(cls, v: str) -> str:

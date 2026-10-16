@@ -45,6 +45,16 @@ def test_register_rejects_short_password(api_client):
     assert resp.status_code == 422
 
 
+def test_register_rejects_password_over_bcrypt_byte_limit(api_client):
+    for password in ("a" * 73, "é" * 37):
+        response = api_client.post("/auth/register", json={
+            "username": "mario_rossi", "email": "mario@example.com",
+            "password": password, "password_confirm": password,
+        })
+        assert response.status_code == 422
+        assert "72 byte" in str(response.json())
+
+
 def test_register_rejects_short_username(api_client):
     resp = api_client.post("/auth/register", json={"username": "ab", "email": "ab@example.com", "password": "secret123", "password_confirm": "secret123"})
     assert resp.status_code == 422
@@ -62,6 +72,51 @@ def test_login_with_wrong_password_unauthorized(api_client):
     api_client.post("/auth/register", json={"username": "mario_rossi", "email": "mario_rossi@example.com", "password": "secret123", "password_confirm": "secret123"})
     resp = api_client.post("/auth/login", json={"username": "mario_rossi", "email": "mario_rossi@example.com", "password": "wrongpass", "password_confirm": "wrongpass"})
     assert resp.status_code == 401
+
+
+def test_login_locks_repeated_failures_and_reports_retry_time(api_client):
+    api_client.post("/auth/register", json={"username": "mario_rossi", "email": "mario@example.com",
+                                           "password": "secret123", "password_confirm": "secret123"})
+    for _ in range(5):
+        failed = api_client.post("/auth/login", json={"username": "mario_rossi", "password": "wrongpass"})
+        assert failed.status_code == 401
+    blocked = api_client.post("/auth/login", json={"username": "mario_rossi", "password": "secret123"})
+    assert blocked.status_code == 429
+    assert int(blocked.headers["Retry-After"]) > 0
+
+
+def test_successful_login_clears_account_failures(api_client):
+    api_client.post("/auth/register", json={"username": "mario_rossi", "email": "mario@example.com",
+                                           "password": "secret123", "password_confirm": "secret123"})
+    for _ in range(4):
+        assert api_client.post("/auth/login", json={"username": "mario_rossi", "password": "wrongpass"}).status_code == 401
+    assert api_client.post("/auth/login", json={"username": "mario_rossi", "password": "secret123"}).status_code == 200
+    assert api_client.post("/auth/login", json={"username": "mario_rossi", "password": "wrongpass"}).status_code == 401
+
+
+def test_login_limits_origin_across_usernames(api_client):
+    api_client.post("/auth/register", json={"username": "mario_rossi", "email": "mario@example.com",
+                                           "password": "secret123", "password_confirm": "secret123"})
+    for number in range(20):
+        response = api_client.post("/auth/login", json={"username": f"unknown_{number}", "password": "wrongpass"})
+        assert response.status_code == 401
+    blocked = api_client.post("/auth/login", json={"username": "mario_rossi", "password": "secret123"})
+    assert blocked.status_code == 429
+
+
+def test_login_lock_expires(api_client):
+    import time
+    from backend.db.models import LoginAttempt, SessionLocal
+
+    api_client.post("/auth/register", json={"username": "mario_rossi", "email": "mario@example.com",
+                                           "password": "secret123", "password_confirm": "secret123"})
+    for _ in range(5):
+        api_client.post("/auth/login", json={"username": "mario_rossi", "password": "wrongpass"})
+    with SessionLocal.begin() as db:
+        for row in db.query(LoginAttempt):
+            row.window_started = time.time() - 1800
+            row.blocked_until = time.time() - 1
+    assert api_client.post("/auth/login", json={"username": "mario_rossi", "password": "secret123"}).status_code == 200
 
 
 def test_login_unknown_username_unauthorized(api_client):

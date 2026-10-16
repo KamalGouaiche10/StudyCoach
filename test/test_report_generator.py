@@ -169,6 +169,16 @@ def test_weak_topic_markdown_has_consistent_status_icon():
     assert "| derivate | 4.0/10 | 1 | ❌ Da rivedere |" in md
 
 
+def test_sufficient_topic_is_not_marked_mastered_in_report():
+    report = _sample_report()
+    report["topic_breakdown"] = [{"topic": "integrali", "avg_score": 7.0,
+                                  "n_attempts": 1, "is_weak": False}]
+    report["strong_topics"] = []
+    md = rg.generate_markdown(report, session_id=1)
+    assert "| integrali | 7.0/10 | 1 | 🟡 Sufficiente |" in md
+    assert "Padroneggiato" not in md
+
+
 def test_history_session_deletion_removes_report(isolated_reports_dir):
     from backend.api.session_extras import delete_incomplete_session
     from backend.db.models import Exam, Session, SessionLocal, Student
