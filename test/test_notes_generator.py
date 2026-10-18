@@ -172,6 +172,28 @@ def test_notes_agent_sets_model_and_completion_limit(monkeypatch):
     assert "## Riepilogo" in captured["agent"]["description"]
 
 
+def test_notes_team_coordinates_writer_and_reviewer(monkeypatch):
+    captured = {}
+    writer, reviewer = object(), object()
+
+    monkeypatch.setattr(ng, "_make_notes_agent", lambda *_: writer)
+    monkeypatch.setattr(ng, "_make_notes_review_agent", lambda *_: reviewer)
+    monkeypatch.setattr(ng, "make_model", lambda *args, **kwargs: object())
+
+    def fake_team(**kwargs):
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(ng, "Team", fake_team)
+    ng._make_notes_team("test-model")
+
+    assert captured["mode"] == ng.TeamMode.coordinate
+    assert captured["members"] == [writer, reviewer]
+    assert captured["max_iterations"] > 2
+    assert "Delega" in " ".join(captured["instructions"])
+    assert "revisore" in " ".join(captured["instructions"])
+
+
 def test_notes_review_uses_json_mode_and_separate_token_budget(monkeypatch):
     captured = {}
 
@@ -556,7 +578,7 @@ def test_generate_notes_returns_agent_output(monkeypatch, fake_agent_factory):
     monkeypatch.setattr(ng, "retrieve_passages", lambda **kwargs: [
         {"text": "chunk di materiale " * 20, "source": "Analisi 1", "page": 1}
     ])
-    monkeypatch.setattr(ng, "_make_notes_agent", fake_agent_factory(FAKE_VALID_NOTES))
+    monkeypatch.setattr(ng, "_make_notes_team", fake_agent_factory(FAKE_VALID_NOTES))
 
     notes = ng.generate_notes(student_id=1, exam_id=1, source_name="Analisi 1")
     assert notes == FAKE_VALID_NOTES.strip()
@@ -586,7 +608,7 @@ def test_pdf_notes_report_actual_source_and_part_progress(monkeypatch):
     ])
     monkeypatch.setattr(ng, "_run_with_retry", lambda *args, **kwargs: "## Tema\nFatto.\n\n## Riepilogo\n- Fatto.")
     monkeypatch.setattr(ng, "_verify_notes_fidelity", lambda notes, *_: notes)
-    monkeypatch.setattr(ng, "_make_notes_agent", lambda *_: object())
+    monkeypatch.setattr(ng, "_make_notes_team", lambda *_: object())
     events = []
     pdf = ng.generate_notes_pdf_from_materials(
         1, 1, [{"filename": "letteratura.pdf"}], progress=events.append,
@@ -621,7 +643,7 @@ def test_generate_notes_retries_on_invalid_response(monkeypatch, fake_agent_fact
     ])
     monkeypatch.setattr(ng.time, "sleep", lambda *_: None)
     # Prima risposta troppo corta (non valida) -> ritenta -> seconda risposta valida
-    monkeypatch.setattr(ng, "_make_notes_agent", fake_agent_factory(["troppo corta", FAKE_VALID_NOTES]))
+    monkeypatch.setattr(ng, "_make_notes_team", fake_agent_factory(["troppo corta", FAKE_VALID_NOTES]))
 
     notes = ng.generate_notes(student_id=1, exam_id=1)
     assert notes == FAKE_VALID_NOTES.strip()
