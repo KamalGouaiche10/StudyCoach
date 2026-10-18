@@ -10,6 +10,8 @@ QUIZ_FALLBACK_PROVIDER = "gemini"
 QUIZ_FALLBACK_MODEL = "gemini-3-flash-preview"
 NOTES_PROVIDER = "gemini"
 NOTES_MODEL = "gemini-3.8-flash"
+NOTES_FALLBACK_PROVIDER = "groq"
+NOTES_FALLBACK_MODEL = "openai/gpt-oss-120b"
 
 LLM_MAX_ATTEMPTS = 4
 LLM_TIMEOUT_SECONDS = 30

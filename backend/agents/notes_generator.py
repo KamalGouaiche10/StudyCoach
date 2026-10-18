@@ -24,8 +24,8 @@ from backend.agents.ingestor import retrieve_passages, search_passages
 from backend.agents.groq_config import GROQ_MODEL
 from backend.agents.runtime_config import positive_int
 from backend.observability import run_agent
-from backend.agents.model_router import make_model, provider_name
-from backend.agents.llm_errors import LLM_TIMEOUT_SECONDS, ModelServiceUnavailable, NotesReviewUnavailable, RetryableLLMError, is_rate_limit_error, is_retryable_error, provider_rate_limit_error, rate_limit_from_response
+from backend.agents.model_router import ModelChoice, fallback_choice, make_model, provider_name
+from backend.agents.llm_errors import LLM_TIMEOUT_SECONDS, ModelServiceUnavailable, NotesReviewUnavailable, RetryableLLMError, http_status, is_rate_limit_error, is_retryable_error, provider_rate_limit_error, rate_limit_from_response
 from backend.agents.pdf_utils import pdf_text, register_unicode_fonts
 
 load_dotenv()
@@ -213,11 +213,11 @@ def _log_usage(output: object) -> str:
     return f"token input={input_tokens or '?'} output={output_tokens or '?'}"
 
 
-def _make_notes_agent(model_name: str | None) -> Agent:
+def _make_notes_agent(model_name: str | None, *, choice: ModelChoice | None = None) -> Agent:
     return Agent(
         name="NotesGeneratorAgent",
         role="Scrive appunti Markdown usando esclusivamente il materiale fornito dal leader.",
-        model=make_model("notes", model_name, max_tokens=MAX_COMPLETION_TOKENS),
+        model=make_model("notes", model_name, max_tokens=MAX_COMPLETION_TOKENS, choice=choice),
         description=(
             "Genera appunti accademici completi in Markdown sulla base del prompt. "
             "Rispetta tutti i vincoli richiesti e includi obbligatoriamente una sezione "
@@ -227,25 +227,26 @@ def _make_notes_agent(model_name: str | None) -> Agent:
     )
 
 
-def _make_notes_review_agent(model_name: str | None) -> Agent:
+def _make_notes_review_agent(model_name: str | None, *, choice: ModelChoice | None = None) -> Agent:
     """Use JSON mode and leave room for a final answer after model reasoning."""
     return Agent(
         name="NotesFidelityReviewAgent",
         role="Controlla la fedeltà degli appunti alla fonte e segnala i passaggi non supportati.",
-        model=make_model("notes", model_name, max_tokens=MAX_REVIEW_TOKENS, json_mode=True),
+        model=make_model("notes", model_name, max_tokens=MAX_REVIEW_TOKENS, json_mode=True, choice=choice),
         description=("Verifica gli appunti rispetto al materiale fornito. "
                      "Rispondi esclusivamente con un oggetto JSON contenente unsupported."),
         markdown=False,
     )
 
 
-def _make_notes_team(model_name: str | None) -> Team:
+def _make_notes_team(model_name: str | None, *, choice: ModelChoice | None = None) -> Team:
     """Team del corso: leader che delega scrittura e controllo a due worker."""
     return Team(
         name="NotesTeam",
         mode=TeamMode.coordinate,
-        model=make_model("notes", model_name, max_tokens=MAX_COMPLETION_TOKENS),
-        members=[_make_notes_agent(model_name), _make_notes_review_agent(model_name)],
+        model=make_model("notes", model_name, max_tokens=MAX_COMPLETION_TOKENS, choice=choice),
+        members=[_make_notes_agent(model_name, choice=choice),
+                 _make_notes_review_agent(model_name, choice=choice)],
         instructions=[
             "Coordina la creazione degli appunti usando soltanto il materiale nella richiesta.",
             "Delega la prima stesura a NotesGeneratorAgent.",
@@ -261,6 +262,32 @@ def _make_notes_team(model_name: str | None) -> Team:
         store_member_responses=True,
         max_iterations=6,
     )
+
+
+def _check_notes_team_members(output: object) -> None:
+    """A finished leader response is insufficient if a worker failed or was skipped."""
+    required = {"NotesGeneratorAgent", "NotesFidelityReviewAgent"}
+    completed = set()
+    for member in getattr(output, "member_responses", None) or []:
+        name = getattr(member, "agent_name", None)
+        if name not in required:
+            continue
+        content = member.get_content_as_string() or ""
+        status = getattr(member, "status", None)
+        if str(getattr(status, "value", status)).upper() == "ERROR" or _is_error_response(content):
+            error = _response_error(content)
+            if not is_retryable_error(error):
+                error = ModelServiceUnavailable(
+                    "Un agente del Team non ha completato la richiesta. Riprova più tardi."
+                )
+            raise error
+        completed.add(name)
+    if completed != required:
+        error = ModelServiceUnavailable(
+            "Il Team non ha completato la scrittura e la verifica degli appunti. Riprova più tardi."
+        )
+        error.team_incomplete = True
+        raise error
 
 
 def _build_log_summary(attempts: list[dict]) -> str:
@@ -394,6 +421,8 @@ def _notes_from_passages(
         raise ValueError(f"Nessun contenuto indicizzato per {source_name}")
     template = _load_prompt_template()
     sections = []
+    backup = fallback_choice("notes")
+    using_backup = [False]
     for index, context in enumerate(contexts, 1):
         if progress:
             progress({"phase": "generating", "part": index, "parts": len(contexts)})
@@ -401,17 +430,29 @@ def _notes_from_passages(
             mode="materiale", source_name=source_name, context=context,
             log_summary="", weak_topics="",
         )
-        notes = _run_with_retry(_make_notes_team(model_name), prompt, source_context=context)
+        notes = _run_with_retry(
+            _make_notes_team(model_name, choice=backup) if using_backup[0]
+            else _make_notes_team(model_name),
+            prompt, source_context=context,
+            fallback_factory=(lambda: _make_notes_team(model_name, choice=backup))
+            if backup and not using_backup[0] else None,
+            on_fallback=lambda: using_backup.__setitem__(0, True),
+        )
         if progress:
             progress({"phase": "reviewing", "part": index, "parts": len(contexts)})
-        notes = _verify_notes_fidelity(notes, context, model_name)
+        notes = _verify_notes_fidelity(
+            notes, context, model_name, choice=backup if using_backup[0] else None,
+        )
         sections.append((f"Parte {index}", notes))
         if progress:
             progress({"phase": "part_done", "part": index, "parts": len(contexts)})
     return _merge_note_sections(sections)
 
 
-def _verify_notes_fidelity(notes: str, source_context: str, model_name: str) -> str:
+def _verify_notes_fidelity(
+    notes: str, source_context: str, model_name: str,
+    *, choice: ModelChoice | None = None,
+) -> str:
     """Review factual claims against source text; remove only unsupported lines."""
     prompt = (
         "Controlla in modo indipendente la fedeltà degli appunti rispetto al materiale. "
@@ -423,13 +464,16 @@ def _verify_notes_fidelity(notes: str, source_context: str, model_name: str) -> 
         "Se tutto è sostenuto, usa una lista vuota.\n\n"
         f"MATERIALE:\n{source_context}\n\nAPPUNTI:\n{notes}"
     )
-    agent = _make_notes_review_agent(model_name)
+    agent = _make_notes_review_agent(model_name, choice=choice)
+    backup = fallback_choice("notes") if choice is None else None
+    used_fallback = False
     review_prompt = prompt
     for attempt in range(1, MAX_REVIEW_ATTEMPTS + 1):
         try:
             output = run_agent(agent, review_prompt, "notes_review")
             response = output.get_content_as_string()
-            if getattr(output, "status", None) == "ERROR" or (response and _is_error_response(response)):
+            status = getattr(output, "status", None)
+            if str(getattr(status, "value", status)).upper() == "ERROR" or (response and _is_error_response(response)):
                 raise _response_error(response)
             data = parse_json_object(response)
             unsupported = data.get("unsupported")
@@ -438,8 +482,14 @@ def _verify_notes_fidelity(notes: str, source_context: str, model_name: str) -> 
             if any(not item.strip() or item not in notes for item in unsupported):
                 raise LLMJsonError("passaggio non supportato non copiato esattamente dagli appunti")
             break
-        except ModelServiceUnavailable:
+        except (ModelServiceUnavailable, RetryableLLMError) as exc:
             if attempt == MAX_REVIEW_ATTEMPTS:
+                raise
+            if backup is not None and not used_fallback:
+                agent = _make_notes_review_agent(model_name, choice=backup)
+                used_fallback = True
+                continue
+            if is_rate_limit_error(exc):
                 raise
             time.sleep(_retry_delay(attempt)[0])
         except LLMJsonError as exc:
@@ -535,7 +585,11 @@ def _apply_notes_patch(notes: str, raw: str) -> str:
     return notes.replace(old, replacement, 1)
 
 
-def _run_with_retry(agent: Agent, prompt: str, source_context: str = "") -> str:
+def _run_with_retry(
+    agent: Agent | Team, prompt: str, source_context: str = "",
+    fallback_factory: Callable[[], Agent | Team] | None = None,
+    on_fallback: Callable[[], None] | None = None,
+) -> str:
     """Genera appunti con retry limitati e correzioni mirate della risposta."""
     current_prompt = prompt
     current_notes: str | None = None
@@ -543,15 +597,20 @@ def _run_with_retry(agent: Agent, prompt: str, source_context: str = "") -> str:
     patch_correction = False
     last_reason = "generazione iniziale"
     msg = "risposta non valida"
+    active_agent = agent
+    used_fallback = False
 
     for attempt in range(1, MAX_LLM_ATTEMPTS + 1):
-        model = getattr(getattr(agent, "model", None), "id", DEFAULT_MODEL)
+        model = getattr(getattr(active_agent, "model", None), "id", DEFAULT_MODEL)
         print(f"[NotesGenerator] modello={model} tentativo={attempt}/{MAX_LLM_ATTEMPTS} motivo={last_reason}")
         try:
-            output = run_agent(agent, current_prompt, "notes_generate")
+            output = run_agent(active_agent, current_prompt, "notes_generate")
             response = output.get_content_as_string().strip()
-            if getattr(output, "status", None) == "ERROR" or _is_error_response(response):
+            status = getattr(output, "status", None)
+            if str(getattr(status, "value", status)).upper() == "ERROR" or _is_error_response(response):
                 raise _response_error(response)
+            if isinstance(active_agent, Team):
+                _check_notes_team_members(output)
 
             if summary_only_correction and current_notes is not None:
                 base_notes = re.sub(
@@ -573,19 +632,42 @@ def _run_with_retry(agent: Agent, prompt: str, source_context: str = "") -> str:
             if attempt >= MAX_LLM_ATTEMPTS:
                 last_reason = f"validazione non superata: {msg}"
                 break
-            summary_only_correction = msg == "Manca: sezione ## Riepilogo"
-            patch_correction = not summary_only_correction and _has_summary_heading(current_notes)
-            current_prompt = (
-                _summary_correction_prompt(current_notes, source_context)
-                if summary_only_correction
-                else _repair_prompt(current_notes, msg, source_context)
-                if patch_correction
-                else prompt
-            )
+            if isinstance(active_agent, Team):
+                summary_only_correction = patch_correction = False
+                current_prompt = (
+                    prompt + "\n\nLa risposta precedente non superava questo controllo: " + msg + ". "
+                    "Ripeti la delega e restituisci l'intero documento corretto in Markdown, "
+                    "con un titolo di capitolo e la sezione finale ## Riepilogo."
+                )
+            else:
+                summary_only_correction = msg == "Manca: sezione ## Riepilogo"
+                patch_correction = not summary_only_correction and _has_summary_heading(current_notes)
+                current_prompt = (
+                    _summary_correction_prompt(current_notes, source_context)
+                    if summary_only_correction
+                    else _repair_prompt(current_notes, msg, source_context)
+                    if patch_correction
+                    else prompt
+                )
             last_reason = f"correzione mirata: {msg}"
         except Exception as e:
             if not is_retryable_error(e):
                 raise
+            if (fallback_factory is not None and not used_fallback
+                    and (getattr(e, "team_incomplete", False)
+                         or http_status(e) == 429
+                         or (http_status(e) is not None and 500 <= http_status(e) <= 599))
+                    and attempt < MAX_LLM_ATTEMPTS):
+                active_agent = fallback_factory()
+                used_fallback = True
+                if on_fallback:
+                    on_fallback()
+                current_prompt = prompt
+                current_notes = None
+                summary_only_correction = patch_correction = False
+                last_reason = "servizio principale temporaneamente non disponibile"
+                print("[NotesGenerator] provider di riserva attivato dopo errore temporaneo")
+                continue
             if is_rate_limit_error(e) and getattr(e, "quota_period", None) == "daily":
                 raise
             delay, source = _retry_delay(attempt, e) if is_rate_limit_error(e) else _retry_delay(attempt)
