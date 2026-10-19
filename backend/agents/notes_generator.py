@@ -818,10 +818,97 @@ class _NotesPDF(FPDF):
 # RENDERER MARKDOWN CON LAYOUT PULITO
 # ---------------------------------------------------------------------------
 
+def _table_cells(line: str) -> list[str]:
+    """Split a Markdown table row, preserving escaped pipe characters."""
+    line = line.strip().strip("|")
+    cells, cell, escaped = [], [], False
+    for char in line:
+        if char == "|" and not escaped:
+            cells.append("".join(cell).strip())
+            cell = []
+        else:
+            cell.append(char)
+        escaped = char == "\\" and not escaped
+        if char != "\\":
+            escaped = False
+    cells.append("".join(cell).strip())
+    return [value.replace("\\|", "|") for value in cells]
+
+
+def _table_separator(line: str, columns: int) -> bool:
+    cells = _table_cells(line)
+    return len(cells) == columns and all(
+        re.fullmatch(r":?-{3,}:?", cell) for cell in cells
+    )
+
+
+def _render_table(pdf: _NotesPDF, rows: list[list[str]]) -> None:
+    """Draw aligned, wrapped cells and repeat the heading after page breaks."""
+    width = pdf.w - LEFT_MARGIN - RIGHT_MARGIN
+    columns = len(rows[0])
+    minimum = min(24.0, width / columns)
+    weights = [max(12, min(65, max(len(_strip_inline(row[col])) for row in rows)))
+               for col in range(columns)]
+    free = max(0.0, width - minimum * columns)
+    total_weight = sum(weights)
+    widths = [minimum + free * weight / total_weight for weight in weights]
+    line_height, padding = 4.5, 2.0
+
+    def draw_row(cells: list[str], header: bool = False) -> None:
+        pdf.set_font("Arial", "B" if header else "", 9)
+        wrapped = []
+        for col, cell in enumerate(cells):
+            content = pdf_text(_strip_inline(cell))
+            wrapped.append(pdf.multi_cell(
+                widths[col] - padding * 2, line_height, content,
+                dry_run=True, output="LINES", align="L",
+            ) or [""])
+        row_height = max(len(part) for part in wrapped) * line_height + padding * 2
+        available = pdf.h - BOTTOM_MARGIN - pdf._footer_height - pdf.get_y()
+        fresh_space = pdf.h - BOTTOM_MARGIN - pdf._footer_height - pdf._page_start_y
+        if not header and row_height > available and row_height < fresh_space - 20:
+            pdf.add_page()
+            pdf.set_y(pdf._page_start_y)
+            draw_row(rows[0], header=True)
+            pdf.set_font("Arial", "", 9)
+        while any(wrapped):
+            available = pdf.h - BOTTOM_MARGIN - pdf._footer_height - pdf.get_y()
+            count = max(1, int((available - padding * 2) // line_height))
+            if count < 1 or available < line_height + padding * 2:
+                pdf.add_page()
+                pdf.set_y(pdf._page_start_y)
+                if not header:
+                    draw_row(rows[0], header=True)
+                    pdf.set_font("Arial", "", 9)
+                available = pdf.h - BOTTOM_MARGIN - pdf._footer_height - pdf.get_y()
+                count = max(1, int((available - padding * 2) // line_height))
+            fragments = [part[:count] for part in wrapped]
+            wrapped = [part[count:] for part in wrapped]
+            height = max(len(part) for part in fragments) * line_height + padding * 2
+            y = pdf.get_y()
+            x = LEFT_MARGIN
+            pdf.set_fill_color(*(44, 62, 80) if header else (247, 249, 251))
+            pdf.set_text_color(*(255, 255, 255) if header else (40, 40, 40))
+            pdf.set_draw_color(195, 205, 214)
+            for col, fragment in enumerate(fragments):
+                pdf.rect(x, y, widths[col], height, style="DF")
+                pdf.set_xy(x + padding, y + padding)
+                pdf.multi_cell(widths[col] - padding * 2, line_height,
+                               "\n".join(fragment), align="L")
+                x += widths[col]
+            pdf.set_xy(LEFT_MARGIN, y + height)
+
+    pdf.ensure_space(line_height + padding * 2)
+    draw_row(rows[0], header=True)
+    for row in rows[1:]:
+        draw_row(row)
+    pdf.set_text_color(40, 40, 40)
+    pdf.ln(3)
+
 def _render_markdown(pdf: _NotesPDF, text_md: str):
     """
     Renderer Markdown → PDF con layout professionale e senza sovrapposizioni.
-    Gestisce: H2, H3, H4, Blockquote (>), Bullet (-), Numerate (1.), Paragrafi.
+    Gestisce: titoli, citazioni, liste, tabelle Markdown e paragrafi.
     """
     PAGE_W = pdf.w - LEFT_MARGIN - RIGHT_MARGIN
     LH = LINE_HEIGHT
@@ -843,6 +930,22 @@ def _render_markdown(pdf: _NotesPDF, text_md: str):
         if not line:
             pdf.ln(2)
             i += 1
+            continue
+
+        # Una tabella richiede intestazione, separatore e righe coerenti.
+        if ("|" in line and i + 2 < len(lines)
+                and _table_separator(lines[i + 1], len(_table_cells(line)))):
+            header = _table_cells(line)
+            rows = [header]
+            end = i + 2
+            while end < len(lines) and "|" in lines[end]:
+                row = _table_cells(lines[end])
+                if len(row) != len(header):
+                    break
+                rows.append(row)
+                end += 1
+            _render_table(pdf, rows)
+            i = end
             continue
 
         # --- Separatore ---

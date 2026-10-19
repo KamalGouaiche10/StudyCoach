@@ -885,6 +885,28 @@ def test_generate_notes_pdf_preserves_accents_and_symbols(monkeypatch):
     assert "Perché è già così" in text
 
 
+def test_pdf_markdown_table_wraps_and_repeats_header_across_pages():
+    from pypdf import PdfReader
+
+    pdf = ng._NotesPDF("Appunti")
+    pdf.add_page()
+    rows = "\n".join(
+        f"| Caso {i} | Descrizione estesa del caso {i}. " + "Dettaglio tecnico. " * 8 + "|"
+        for i in range(1, 32)
+    )
+    ng._render_markdown(
+        pdf, "## Tabella\n\n| Caso | Descrizione |\n| --- | --- |\n" + rows
+    )
+    pages = PdfReader(io.BytesIO(bytes(pdf.output())))
+    assert len(pages.pages) > 1
+    for page in pages.pages:
+        assert "Caso" in page.extract_text()
+        assert "Descrizione" in page.extract_text()
+    all_text = "\n".join(page.extract_text() for page in pages.pages)
+    assert "Caso 1" in all_text and "Caso 31" in all_text
+    assert "| --- |" not in all_text
+
+
 def test_pdf_notes_do_not_substitute_another_source(monkeypatch):
     monkeypatch.setattr(ng, "retrieve_passages", lambda *args, **kwargs: [])
     with pytest.raises(ValueError, match="missing.pdf"):
