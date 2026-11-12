@@ -1,10 +1,20 @@
 
+import hashlib
+import logging
+import os
+import uuid
 from pathlib import Path
 from sqlalchemy.exc import SQLAlchemyError
-from fastapi import APIRouter, File, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from starlette.concurrency import run_in_threadpool
 
-from backend.agents.ingestor import delete_exam_collection, ingest_pdf
-from backend.db.models import Exam, Session as DbSession, SessionLocal
+from backend.agents.ingestor import ingest_pdf
+from backend.api.authorization import require_api_owner
+from backend.materials import delete_material, rollback_uncommitted_ingest
+from backend.error_messages import public_error
+from backend.exam_deletion import delete_exam as remove_exam, ExamDeletionCleanupError, ExamDeletionRecoveryError
+from backend.security import safe_name
+from backend.db.models import Exam, Material, Session as DbSession, SessionLocal
 from backend.models.schemas import (
     ExamCreate,
     ExamListResponse,
@@ -12,9 +22,11 @@ from backend.models.schemas import (
     IngestResponse,
 )
 
-router = APIRouter(prefix="/exams", tags=["exams"])
+router = APIRouter(prefix="/exams", tags=["exams"], dependencies=[Depends(require_api_owner)])
+logger = logging.getLogger(__name__)
 
-UPLOAD_DIR = Path("./data/uploads")
+DEFAULT_UPLOAD_DIR = Path(__file__).resolve().parents[2] / "data" / "uploads"
+UPLOAD_DIR = DEFAULT_UPLOAD_DIR
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -113,9 +125,10 @@ def create_exam(
         )
     except SQLAlchemyError as exc:
         db.rollback()
+        logger.exception("Failed to create exam")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Errore creazione esame: {exc}",
+            detail="Impossibile creare l'esame. Riprova.",
         ) from exc
     finally:
         db.close()
@@ -130,36 +143,17 @@ def delete_exam(
     exam_id: int,
     student_id: int = Query(..., description="ID dello studente"),
 ) -> None:
-    """
-    Elimina l'esame dal DB (cascade su sessioni) e rimuove la collection ChromaDB.
-    """
-    db = SessionLocal()
     try:
-        exam = (
-            db.query(Exam)
-            .filter(Exam.id == exam_id, Exam.student_id == student_id)
-            .first()
-        )
-        if not exam:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Esame {exam_id} non trovato.",
-            )
-        db.delete(exam)
-        db.commit()
-    except HTTPException:
-        raise
-    except SQLAlchemyError as exc:
-        db.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Errore eliminazione esame: {exc}",
-        ) from exc
-    finally:
-        db.close()
-
-    # Rimuovi collection ChromaDB — separato dal blocco DB
-    delete_exam_collection(student_id, exam_id)
+        remove_exam(student_id, exam_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ExamDeletionCleanupError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except ExamDeletionRecoveryError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Failed to delete exam %s for student %s", exam_id, student_id)
+        raise HTTPException(status_code=500, detail="Impossibile eliminare l'esame. Riprova.") from exc
 
 
 @router.post(
@@ -174,7 +168,7 @@ async def ingest_pdf_endpoint(
 ) -> IngestResponse:
     """
     Carica un file PDF, lo salva temporaneamente e avvia l'indicizzazione
-    tramite ChromaDB + Gemini Embeddings.
+    tramite ChromaDB + embedding locale.
 
     Se la collection esiste già, i nuovi chunk vengono aggiunti a quelli esistenti.
     Per sostituire completamente il materiale, elimina l'esame e ricrealo.
@@ -188,38 +182,117 @@ async def ingest_pdf_endpoint(
             detail="Il file deve essere un PDF (.pdf).",
         )
 
-    # Salva il file su disco
-    safe_name = f"s{student_id}_e{exam_id}_{file.filename}"
-    pdf_path = UPLOAD_DIR / safe_name
-
+    pdf_path = None
     try:
-        # FastAPI UploadFile supports async .read(); leggiamo i bytes
-        content = await file.read()
+    # Bound the read before allocating or writing the uploaded content.
+        max_bytes = int(os.getenv("MAX_UPLOAD_BYTES", str(25 * 1024 * 1024)))
+        content = await file.read(max_bytes + 1)
+        if len(content) > max_bytes:
+            raise HTTPException(status_code=413, detail="PDF troppo grande.")
+        if not content.startswith(b"%PDF-"):
+            raise HTTPException(status_code=400, detail="Il contenuto non è un PDF valido.")
+        file_hash = hashlib.sha256(content).hexdigest()
+        stored_name = f"{uuid.uuid4().hex}.pdf"
+        pdf_path = UPLOAD_DIR / stored_name
         with pdf_path.open("wb") as dest:
             dest.write(content)
     except OSError as exc:
+        logger.exception("Failed to save uploaded PDF")
+        if pdf_path is not None:
+            try:
+                pdf_path.unlink(missing_ok=True)
+            except OSError:
+                logger.exception("Failed to remove partial uploaded PDF")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Errore salvataggio file: {exc}",
+            detail="Impossibile salvare il PDF. Controlla lo spazio disponibile e riprova.",
         ) from exc
 
     # Indicizzazione
     try:
-        stats = ingest_pdf(str(pdf_path), student_id, exam_id)
+        stats = await run_in_threadpool(ingest_pdf, str(pdf_path), student_id, exam_id, source_file=safe_name(file.filename))
     except ValueError as exc:
+        try:
+            pdf_path.unlink(missing_ok=True)
+        except OSError:
+            logger.exception("Failed to remove PDF after validation error")
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=str(exc),
+            detail=public_error(exc, "PDF non utilizzabile. Controlla il file e riprova."),
         ) from exc
     except Exception as exc:
+        logger.exception("Failed to ingest PDF for exam %s", exam_id)
+        try:
+            pdf_path.unlink(missing_ok=True)
+        except OSError:
+            logger.exception("Failed to remove PDF after ingest error")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Errore indicizzazione PDF: {exc}",
+            detail=public_error(exc, "Impossibile indicizzare il PDF. Riprova."),
         ) from exc
 
+    db = SessionLocal()
+    try:
+        existing = db.query(Material).filter(
+            Material.exam_id == exam_id,
+            Material.file_hash == stats["file_hash"],
+        ).first()
+        if not existing:
+            db.add(Material(
+                exam_id=exam_id,
+                filename=safe_name(file.filename or "documento.pdf"),
+                stored_path=str(pdf_path),
+                pages_count=stats["pages"],
+                pages_with_text=stats.get("pages_with_text", stats["pages"]),
+                pages_skipped=stats.get("pages_skipped", 0),
+                chunks_count=stats["chunks"],
+                file_hash=stats["file_hash"],
+            ))
+            db.commit()
+        else:
+            pdf_path.unlink(missing_ok=True)
+    except Exception as exc:
+        db.rollback()
+        try:
+            rollback_uncommitted_ingest(student_id, exam_id, stats["file_hash"])
+        except Exception as cleanup_exc:
+            logger.exception("Failed to roll back indexed chunks for exam %s", exam_id)
+            raise HTTPException(
+                status_code=500,
+                detail="PDF non salvato e pulizia dell'indice incompleta. Contatta l'amministratore.",
+            ) from cleanup_exc
+        try:
+            pdf_path.unlink(missing_ok=True)
+        except OSError:
+            logger.exception("Failed to remove uploaded PDF after database error")
+        logger.exception("Failed to save material record for exam %s", exam_id)
+        raise HTTPException(status_code=500, detail="PDF non salvato. Riprova.") from exc
+    finally:
+        db.close()
     return IngestResponse(
         file=stats["file"],
         pages=stats["pages"],
         chunks=stats["chunks"],
         collection=stats["collection"],
     )
+
+
+@router.delete(
+    "/{exam_id}/materials/{material_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Elimina una fonte dall'esame",
+)
+def delete_exam_material(
+    exam_id: int,
+    material_id: int,
+    student_id: int = Query(..., description="ID dello studente"),
+) -> None:
+    try:
+        delete_material(student_id, exam_id, material_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Failed to delete material %s", material_id)
+        raise HTTPException(
+            status_code=500, detail="Impossibile eliminare la fonte. Riprova."
+        ) from exc

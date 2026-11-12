@@ -5,6 +5,7 @@ def test_health_check(api_client):
     resp = api_client.get("/health")
     assert resp.status_code == 200
     assert resp.json() == {"status": "ok", "service": "Study Coach API"}
+    assert len(resp.headers["X-Request-ID"]) == 32
 
 
 def test_docs_available(api_client):
@@ -20,11 +21,15 @@ def test_openapi_lists_all_routers(api_client):
     assert "/exams" in paths
     assert "/sessions" in paths
     assert "/sessions/{session_id}/tutor/start" in paths
+    assert "/auth/me" in paths
+    assert "/exams/{exam_id}/materials" in paths
+    assert "/exams/{exam_id}/doubts" in paths
+    assert "/sessions/{session_id}/detail" in paths
 
 
-def test_cors_headers_present_for_allowed_origin(api_client):
-    resp = api_client.get("/health", headers={"Origin": "http://localhost:8501"})
-    assert resp.headers.get("access-control-allow-origin") == "http://localhost:8501"
+def test_no_cross_origin_access_by_default(api_client):
+    resp = api_client.get("/health", headers={"Origin": "http://localhost:5173"})
+    assert resp.headers.get("access-control-allow-origin") is None
 
 
 def test_unknown_route_returns_404(api_client):

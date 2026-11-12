@@ -13,11 +13,15 @@ from pathlib import Path
 from typing import cast
 
 from agno.agent import Agent
-from agno.models.groq import Groq
 from dotenv import load_dotenv
 
-from backend.agents.ingestor import retrieve_chunks
+from backend.agents.ingestor import search_passages
 from backend.agents.groq_config import GROQ_MODEL, safe_groq_error
+from backend.agents.model_router import make_model
+from backend.agents.llm_errors import (MAX_LLM_ATTEMPTS, is_retryable_error, retry_delay)
+from backend.agents.evaluation_validator import validate_contestation, validate_evaluation
+from backend.agents.quality_controls import add_citations, delimit_contestation, is_spoiler, rubric_score, parse_json_object
+from backend.observability import run_agent
 
 load_dotenv()
 
@@ -28,6 +32,10 @@ load_dotenv()
 PROMPTS_DIR = Path(__file__).parent / "prompts"
 PROMPT_GUIDE = "socratic_tutor_guide_v1"
 PROMPT_EVAL = "socratic_tutor_eval_v1"
+
+
+class NoRelevantMaterialError(ValueError):
+    """The requested topic has no supporting passage in the selected files."""
 PROMPT_CONTEST = "socratic_tutor_contest_v1"
 PROMPT_DOUBT_OPEN = "socratic_tutor_doubt_open_v1"
 PROMPT_DOUBT_EVAL = "socratic_tutor_doubt_eval_v1"
@@ -35,6 +43,11 @@ PROMPT_DOUBT_EVAL = "socratic_tutor_doubt_eval_v1"
 DEFAULT_MODEL = GROQ_MODEL
 DEFAULT_N_CHUNKS = 5
 RETRY_DELAY = 3
+# Risposte piu' lunghe possono contenere contenuto disciplinare anche se
+# includono una formula di incertezza.  La soglia e' intenzionalmente
+# configurabile per poterla tarare sul materiale e sul modello usato.
+NON_ANSWER_MAX_WORDS = 5
+NON_ANSWER_MIN_EXTRA_WORDS = 3
 
 NON_ANSWER_PATTERNS = (
     r"\bnon\s+so\b",
@@ -52,20 +65,6 @@ NON_ANSWER_PATTERNS = (
 # ---------------------------------------------------------------------------
 # Helper per rate limit
 # ---------------------------------------------------------------------------
-
-def _is_rate_limit_error(raw: str) -> bool:
-    """Verifica se la risposta contiene un errore di rate limit."""
-    if not raw:
-        return False
-    lower = raw.lower()
-    return any([
-        'rate limit' in lower,
-        'rate_limit_exceeded' in lower,
-        'try again in' in lower,
-        '429' in raw,
-        'tokens per day' in lower,
-    ])
-
 
 def _parse_retry_after(raw: str) -> int | None:
     """Estrae il tempo di attesa dal messaggio di errore (in secondi)."""
@@ -105,6 +104,11 @@ class EvaluationResult:
     correct_points: list[str]
     missing_points: list[str]
     improvement_after_guidance: str
+    reliable: bool = True
+
+
+class InsufficientEvaluationMaterialError(RuntimeError):
+    """The retrieved source cannot support an academic assessment."""
 
 
 @dataclass
@@ -115,6 +119,7 @@ class ContestationResult:
     contestation_assessment: str
     final_motivation: str
     response_to_student: str
+    reliable: bool = True
 
 
 class DoubtState(Enum):
@@ -174,31 +179,46 @@ def _load_prompt(version_name: str) -> str:
     path = PROMPTS_DIR / f"{version_name}.txt"
     if not path.exists():
         raise FileNotFoundError(f"Prompt non trovato: {path}")
-    raw = path.read_text(encoding="utf-8")
-    parts = raw.split("---\n\n", maxsplit=1)
-    return parts[-1]
+    return path.read_text(encoding="utf-8")
 
 
 def _parse_json(raw: str) -> dict:
-    cleaned = re.sub(r"```(?:json)?\s*", "", raw).strip().rstrip("`").strip()
-    try:
-        return json.loads(cleaned)
-    except json.JSONDecodeError as e:
-        raise ValueError(
-            f"JSON non valido dal modello.\nErrore: {e}\n"
-            f"Risposta (500 char):\n{raw[:500]}"
-        ) from e
+    return parse_json_object(raw)
 
 
 def _is_non_answer(text: str) -> bool:
     normalized = " ".join(text.lower().strip().split())
     if not normalized:
         return True
-    return any(re.search(pattern, normalized) for pattern in NON_ANSWER_PATTERNS)
+
+    matches = [re.search(pattern, normalized) for pattern in NON_ANSWER_PATTERNS]
+    matches = [match for match in matches if match is not None]
+    if not matches:
+        return False
+
+    # Un pattern da solo non basta: rimuoviamo le espressioni di incertezza
+    # e consideriamo il resto. Una risposta breve e quasi interamente fatta
+    # di "non so/boh" resta non-risposta; testo extra sufficientemente lungo
+    # viene invece lasciato al valutatore disciplinare.
+    remainder = normalized
+    for match in sorted(matches, key=lambda item: item.start(), reverse=True):
+        remainder = remainder[:match.start()] + remainder[match.end():]
+    extra_words = re.findall(r"\b[\wÀ-ÿ']+\b", remainder)
+    total_words = re.findall(r"\b[\wÀ-ÿ']+\b", normalized)
+    return (
+        len(total_words) <= NON_ANSWER_MAX_WORDS
+        and len(extra_words) < NON_ANSWER_MIN_EXTRA_WORDS
+    )
+
+
+def _is_role_spoofing_only(text: str) -> bool:
+    """Reject a reply that consists entirely of a forged instruction role."""
+    return bool(re.match(r"(?is)^\s*(?:\[system\]|<\|system\|>).*", text))
 
 
 def _apply_severity_guardrails(attempt: QuestionAttempt, evaluation: EvaluationResult) -> EvaluationResult:
-    if not _is_non_answer(attempt.student_answer_2):
+    if not (_is_non_answer(attempt.student_answer_2)
+            or _is_role_spoofing_only(attempt.student_answer_2)):
         return evaluation
 
     missing_points = list(evaluation.missing_points)
@@ -207,8 +227,8 @@ def _apply_severity_guardrails(attempt: QuestionAttempt, evaluation: EvaluationR
         missing_points.append(strict_missing)
 
     strict_motivation = (
-        "Valutazione severa applicata: la seconda risposta e' una non-risposta "
-        "(es. 'non so') e non dimostra comprensione del contenuto."
+        "Valutazione severa applicata: la seconda risposta non contiene "
+        "una risposta disciplinare valutabile."
     )
     if evaluation.motivation:
         strict_motivation = f"{strict_motivation} {evaluation.motivation}"
@@ -219,6 +239,45 @@ def _apply_severity_guardrails(attempt: QuestionAttempt, evaluation: EvaluationR
         correct_points=evaluation.correct_points,
         missing_points=missing_points,
         improvement_after_guidance=evaluation.improvement_after_guidance,
+    )
+
+
+_CONTENT_STOPWORDS = {
+    "anche", "ancora", "come", "con", "dalla", "delle", "dello", "dentro",
+    "dopo", "essere", "fatto", "forse", "importante", "inoltre", "molto",
+    "nella", "nelle", "nello", "perche", "perché", "questo", "questa",
+    "quindi", "risposta", "secondo", "sopra", "studiare", "studiato",
+    "tutto", "vero",
+}
+
+
+def _lacks_verifiable_content(attempt: QuestionAttempt) -> bool:
+    """Flag short replies consisting only of generic or study-related words."""
+    answer = attempt.student_answer_2.casefold()
+    words = re.findall(r"[\wÀ-ÿ]+", answer)
+    if len(words) > 18 or re.search(r"[=+*/^<>∑∫√]", answer):
+        return False
+    question_terms = set(re.findall(r"[\wÀ-ÿ]+", attempt.question_text.casefold()))
+    answer_terms = {
+        word for word in words
+        if len(word) >= 4 and word not in _CONTENT_STOPWORDS and word not in question_terms
+    }
+    return not answer_terms
+
+
+def _apply_content_guardrail(
+    attempt: QuestionAttempt, evaluation: EvaluationResult
+) -> EvaluationResult:
+    if evaluation.score <= 1 or not _lacks_verifiable_content(attempt):
+        return evaluation
+    return EvaluationResult(
+        score=1,
+        motivation=(evaluation.motivation + " Punteggio limitato a 1/10: la risposta finale "
+                    "contiene solo frasi generiche sullo studio.").strip(),
+        correct_points=evaluation.correct_points,
+        missing_points=evaluation.missing_points + ["Nessuna affermazione disciplinare nella risposta finale."],
+        improvement_after_guidance=evaluation.improvement_after_guidance,
+        reliable=evaluation.reliable,
     )
 
 
@@ -251,7 +310,11 @@ def _has_no_real_gaps(missing_points: list[str]) -> bool:
     return True
 
 
-def _apply_consistency_guardrails(evaluation: EvaluationResult) -> EvaluationResult:
+def _apply_consistency_guardrails(
+    evaluation: EvaluationResult,
+    *,
+    missing_points_present: bool = True,
+) -> EvaluationResult:
     """
     Garantisce coerenza tra punteggio e lacune segnalate: se il valutatore
     non ha indicato alcuna lacuna disciplinare reale, il punteggio non può
@@ -260,7 +323,8 @@ def _apply_consistency_guardrails(evaluation: EvaluationResult) -> EvaluationRes
     come corretti e nessun punto mancante, ma assegna comunque un voto
     parziale in modo incoerente.
     """
-    if evaluation.score >= 9:
+   
+    if not missing_points_present or evaluation.score >= 9:
         return evaluation
     if not _has_no_real_gaps(evaluation.missing_points):
         return evaluation
@@ -287,7 +351,7 @@ def _apply_consistency_guardrails(evaluation: EvaluationResult) -> EvaluationRes
 def _guide_agent(model_name: str) -> Agent:
     return Agent(
         name="SocraticGuideAgent",
-        model=Groq(id=model_name),
+        model=make_model("tutor", model_name),
         description=(
             "Sei un tutor socratico universitario. "
             "NON dare mai la risposta corretta. "
@@ -301,7 +365,7 @@ def _guide_agent(model_name: str) -> Agent:
 def _eval_agent(model_name: str) -> Agent:
     return Agent(
         name="EvaluatorAgent",
-        model=Groq(id=model_name),
+        model=make_model("tutor", model_name),
         description=(
             "Sei un valutatore universitario esperto e obiettivo. "
             "Valuta la preparazione dello studente con un voto 0-10. "
@@ -314,7 +378,7 @@ def _eval_agent(model_name: str) -> Agent:
 def _contest_agent(model_name: str) -> Agent:
     return Agent(
         name="ContestationAgent",
-        model=Groq(id=model_name),
+        model=make_model("tutor", model_name),
         description=(
             "Sei un valutatore universitario imparziale. "
             "Riesamina la valutazione con obiettività dopo la contestazione. "
@@ -327,7 +391,7 @@ def _contest_agent(model_name: str) -> Agent:
 def _doubt_agent(model_name: str) -> Agent:
     return Agent(
         name="DoubtTutorAgent",
-        model=Groq(id=model_name),
+        model=make_model("tutor", model_name),
         description=(
             "Sei un tutor socratico universitario. Aiuti lo studente a chiarire "
             "un proprio dubbio guidandolo con domande mirate, senza mai rivelare "
@@ -354,38 +418,43 @@ def _generate_guiding_question(
     )
     agent = _guide_agent(model_name)
 
-    attempt_num = 0
-    while True:
-        attempt_num += 1
+    for attempt_num in range(1, MAX_LLM_ATTEMPTS + 1):
         try:
-            output = agent.run(prompt, stream=False)
+            output = run_agent(agent, prompt, "tutor_guide")
             raw = output.get_content_as_string()
 
-            if _is_rate_limit_error(raw):
-                wait = _parse_retry_after(raw)
-                if wait and wait > 0:
-                    print(f"[SocraticGuideAgent] Rate limit, attendo {wait}s...")
-                    time.sleep(min(wait, 60))  # al massimo 60s per non bloccare troppo
-                else:
-                    time.sleep(RETRY_DELAY)
-                continue
-
             data = _parse_json(raw)
-            if "guiding_question" not in data:
-                raise ValueError(f"Risposta mancante di 'guiding_question': {data}")
+            question = data.get("guiding_question")
+            if not isinstance(question, str) or not question.strip():
+                raise ValueError("Domanda guida assente o vuota")
+            if any(is_spoiler(question, chunk, attempt.question_text + " " + attempt.student_answer_1) for chunk in context_chunks):
+                if attempt_num == MAX_LLM_ATTEMPTS:
+                    return {
+                        "guiding_question": "Quale passaggio del materiale può aiutarti a precisare la tua risposta?",
+                        "positive_feedback": "",
+                        "focus_area": "Rileggi il passaggio pertinente del materiale.",
+                    }
+                raise ValueError("Domanda guida anticipa la risposta")
             return data
 
         except Exception as e:
+            if not is_retryable_error(e):
+                raise
             print(f"[SocraticGuideAgent] Tentativo {attempt_num} fallito ({safe_groq_error(e)}). Ritento...")
-            time.sleep(RETRY_DELAY)
-            continue
+            if attempt_num < MAX_LLM_ATTEMPTS:
+                time.sleep(retry_delay(attempt_num))
+    raise RuntimeError(f"SocraticGuideAgent: esauriti {MAX_LLM_ATTEMPTS} tentativi")
 
 
-def _evaluate(
+def _evaluate_one(
     attempt: QuestionAttempt,
     context_chunks: list[str],
     model_name: str,
 ) -> EvaluationResult:
+    if not context_chunks:
+        raise InsufficientEvaluationMaterialError(
+            "Materiale insufficiente per valutare la risposta dello studente."
+        )
     template = _load_prompt(PROMPT_EVAL)
     prompt = template.format(
         question=attempt.question_text,
@@ -397,38 +466,85 @@ def _evaluate(
     agent = _eval_agent(model_name)
 
     attempt_num = 0
-    while True:
-        attempt_num += 1
+    validation_failures = 0
+    for attempt_num in range(1, MAX_LLM_ATTEMPTS + 1):
         try:
-            output = agent.run(prompt, stream=False)
+            output = run_agent(agent, prompt, "tutor_evaluate")
             raw = output.get_content_as_string()
 
-            if _is_rate_limit_error(raw):
-                wait = _parse_retry_after(raw)
-                if wait and wait > 0:
-                    print(f"[EvaluatorAgent] Rate limit, attendo {wait}s...")
-                    time.sleep(min(wait, 60))
-                else:
-                    time.sleep(RETRY_DELAY)
-                continue
-
             data = _parse_json(raw)
-            score = max(0, min(10, int(data.get("score", 0))))
+            if data.get("source_sufficient") is False:
+                raise InsufficientEvaluationMaterialError(
+                    "Materiale insufficiente per valutare la risposta dello studente."
+                )
+            validation = validate_evaluation(data)
+            if not validation.valid:
+                validation_failures += 1
+                if validation_failures < 2:
+                    raise ValueError("Giudizio non valido: " + "; ".join(validation.errors))
+                score_value = data.get("score", 0)
+                score_value = score_value if isinstance(score_value, int) and not isinstance(score_value, bool) else 0
+                return EvaluationResult(
+                    score=max(0, min(10, score_value)),
+                    motivation="Valutazione non affidabile: " + "; ".join(validation.errors),
+                    correct_points=data.get("correct_points", []) if isinstance(data.get("correct_points", []), list) else [],
+                    missing_points=data.get("missing_points", []) if isinstance(data.get("missing_points", []), list) else [],
+                    improvement_after_guidance=data.get("improvement_after_guidance", ""),
+                    reliable=False,
+                )
+            if "score" not in data or "missing_points" not in data:
+                raise ValueError("JSON di valutazione mancante di 'score' o 'missing_points'")
+            if not isinstance(data["missing_points"], list):
+                raise ValueError("'missing_points' deve essere una lista")
+            score = rubric_score(data.get("correct_points", []), data["missing_points"])
             evaluation = EvaluationResult(
                 score=score,
-                motivation=data.get("motivation", ""),
+                motivation=data.get("motivation", "") or "Valutazione non affidabile.",
                 correct_points=data.get("correct_points", []),
-                missing_points=data.get("missing_points", []),
+                missing_points=data["missing_points"],
                 improvement_after_guidance=data.get("improvement_after_guidance", ""),
+                reliable=validation.valid,
             )
             evaluation = _apply_severity_guardrails(attempt, evaluation)
-            evaluation = _apply_consistency_guardrails(evaluation)
-            return evaluation
+            evaluation = _apply_consistency_guardrails(
+                evaluation,
+                missing_points_present=True,
+            )
+            return _apply_content_guardrail(attempt, evaluation)
 
         except Exception as e:
+            if not is_retryable_error(e):
+                raise
             print(f"[EvaluatorAgent] Tentativo {attempt_num} fallito ({safe_groq_error(e)}). Ritento...")
-            time.sleep(RETRY_DELAY)
-            continue
+            if attempt_num < MAX_LLM_ATTEMPTS:
+                time.sleep(retry_delay(attempt_num))
+    raise RuntimeError(f"EvaluatorAgent: esauriti {MAX_LLM_ATTEMPTS} tentativi")
+
+
+def _evaluate(
+    attempt: QuestionAttempt,
+    context_chunks: list[str],
+    model_name: str,
+) -> EvaluationResult:
+    """Obtain two independent judgments and expose material disagreement."""
+    first = _evaluate_one(attempt, context_chunks, model_name)
+    if not first.reliable:
+        return first
+    second = _evaluate_one(attempt, context_chunks, model_name)
+    if not second.reliable:
+        first.reliable = False
+        first.motivation += " Secondo giudizio non affidabile; voto escluso dalle statistiche."
+        return first
+    chosen = first if first.score <= second.score else second
+    if abs(first.score - second.score) > 1:
+        chosen.reliable = False
+        chosen.motivation += (
+            f" Giudizi discordanti ({first.score}/10 e {second.score}/10); "
+            "voto escluso dalle statistiche."
+        )
+    elif first.score != second.score:
+        chosen.motivation += f" Verifica indipendente: {first.score}/10 e {second.score}/10; mantenuto il voto prudente."
+    return chosen
 
 
 def _re_evaluate_after_contestation(
@@ -447,31 +563,18 @@ def _re_evaluate_after_contestation(
         student_answer_2=attempt.student_answer_2,
         original_score=attempt.evaluation.score,
         original_motivation=attempt.evaluation.motivation,
-        contestation=attempt.contestation_text,
+        contestation=delimit_contestation(attempt.contestation_text),
         context_chunks="\n\n---\n\n".join(context_chunks),
     )
     agent = _contest_agent(model_name)
 
-    attempt_num = 0
-    while True:
-        attempt_num += 1
+    for attempt_num in range(1, MAX_LLM_ATTEMPTS + 1):
         try:
-            output = agent.run(prompt, stream=False)
+            output = run_agent(agent, prompt, "tutor_contest")
             raw = output.get_content_as_string()
-
-            if _is_rate_limit_error(raw):
-                wait = _parse_retry_after(raw)
-                if wait and wait > 0:
-                    print(f"[ContestationAgent] Rate limit, attendo {wait}s...")
-                    time.sleep(min(wait, 60))
-                else:
-                    time.sleep(RETRY_DELAY)
-                continue
 
             data = _parse_json(raw)
             final_score = max(0, min(10, int(data.get("final_score", attempt.evaluation.score))))
-            if _is_non_answer(attempt.student_answer_2):
-                final_score = 0
             delta = final_score - attempt.evaluation.score
 
             return ContestationResult(
@@ -481,12 +584,18 @@ def _re_evaluate_after_contestation(
                 contestation_assessment=data.get("contestation_assessment", "non_valido"),
                 final_motivation=data.get("final_motivation", ""),
                 response_to_student=data.get("response_to_student", ""),
+                reliable=validate_contestation(
+                    data, original_score=attempt.evaluation.score
+                ).valid,
             )
 
         except Exception as e:
+            if not is_retryable_error(e):
+                raise
             print(f"[ContestationAgent] Tentativo {attempt_num} fallito ({safe_groq_error(e)}). Ritento...")
-            time.sleep(RETRY_DELAY)
-            continue
+            if attempt_num < MAX_LLM_ATTEMPTS:
+                time.sleep(retry_delay(attempt_num))
+    raise RuntimeError(f"ContestationAgent: esauriti {MAX_LLM_ATTEMPTS} tentativi")
 
 
 # ---------------------------------------------------------------------------
@@ -505,21 +614,10 @@ def _generate_opening_question(
     )
     agent = _doubt_agent(model_name)
 
-    attempt_num = 0
-    while True:
-        attempt_num += 1
+    for attempt_num in range(1, MAX_LLM_ATTEMPTS + 1):
         try:
-            output = agent.run(prompt, stream=False)
+            output = run_agent(agent, prompt, "doubt_open")
             raw = output.get_content_as_string()
-
-            if _is_rate_limit_error(raw):
-                wait = _parse_retry_after(raw)
-                if wait and wait > 0:
-                    print(f"[DoubtTutorAgent] Rate limit, attendo {wait}s...")
-                    time.sleep(min(wait, 60))
-                else:
-                    time.sleep(RETRY_DELAY)
-                continue
 
             data = _parse_json(raw)
             if "guiding_question" not in data:
@@ -527,9 +625,12 @@ def _generate_opening_question(
             return data
 
         except Exception as e:
+            if not is_retryable_error(e):
+                raise
             print(f"[DoubtTutorAgent] Tentativo {attempt_num} fallito ({safe_groq_error(e)}). Ritento...")
-            time.sleep(RETRY_DELAY)
-            continue
+            if attempt_num < MAX_LLM_ATTEMPTS:
+                time.sleep(retry_delay(attempt_num))
+    raise RuntimeError(f"DoubtTutorAgent: esauriti {MAX_LLM_ATTEMPTS} tentativi")
 
 
 def _evaluate_doubt(
@@ -546,21 +647,10 @@ def _evaluate_doubt(
     )
     agent = _doubt_agent(model_name)
 
-    attempt_num = 0
-    while True:
-        attempt_num += 1
+    for attempt_num in range(1, MAX_LLM_ATTEMPTS + 1):
         try:
-            output = agent.run(prompt, stream=False)
+            output = run_agent(agent, prompt, "doubt_evaluate")
             raw = output.get_content_as_string()
-
-            if _is_rate_limit_error(raw):
-                wait = _parse_retry_after(raw)
-                if wait and wait > 0:
-                    print(f"[DoubtTutorAgent] Rate limit, attendo {wait}s...")
-                    time.sleep(min(wait, 60))
-                else:
-                    time.sleep(RETRY_DELAY)
-                continue
 
             data = _parse_json(raw)
             if "correct_answer" not in data:
@@ -572,9 +662,12 @@ def _evaluate_doubt(
             )
 
         except Exception as e:
+            if not is_retryable_error(e):
+                raise
             print(f"[DoubtTutorAgent] Tentativo {attempt_num} fallito ({safe_groq_error(e)}). Ritento...")
-            time.sleep(RETRY_DELAY)
-            continue
+            if attempt_num < MAX_LLM_ATTEMPTS:
+                time.sleep(retry_delay(attempt_num))
+    raise RuntimeError(f"DoubtTutorAgent: esauriti {MAX_LLM_ATTEMPTS} tentativi")
 
 
 # ---------------------------------------------------------------------------
@@ -590,15 +683,18 @@ class SocraticTutor:
         self,
         student_id: int,
         exam_id: int,
-        model_name: str = DEFAULT_MODEL,
+        model_name: str | None = None,
         n_chunks: int = DEFAULT_N_CHUNKS,
+        material_ids: list[int] | None = None,
     ):
         self.student_id = student_id
         self.exam_id = exam_id
         self.model_name = model_name
         self.n_chunks = n_chunks
+        self.material_ids = material_ids
         self.attempt: QuestionAttempt | None = None
         self._context_cache: list[str] = []
+        self._source_cache: list[dict] = []
 
     def start(self, question_data: dict) -> str:
         self.attempt = QuestionAttempt(
@@ -608,12 +704,14 @@ class SocraticTutor:
             topic_hint=question_data.get("topic_hint", ""),
             state=TurnState.WAITING_ANSWER_1,
         )
-        self._context_cache = retrieve_chunks(
+        self._source_cache = search_passages(
             query=question_data["text"],
             student_id=self.student_id,
             exam_id=self.exam_id,
             n_results=self.n_chunks,
+            material_ids=self.material_ids,
         )
+        self._context_cache = [passage["text"] for passage in self._source_cache]
         return self.attempt.question_text
 
     def submit_answer_1(self, answer: str) -> dict:
@@ -640,6 +738,7 @@ class SocraticTutor:
         attempt.student_answer_2 = answer.strip()
 
         eval_result = _evaluate(attempt, self._context_cache, self.model_name)
+        eval_result.motivation = add_citations(eval_result.motivation, self._source_cache)
         attempt.evaluation = eval_result
         attempt.state = TurnState.EVALUATED
 
@@ -650,6 +749,7 @@ class SocraticTutor:
             "correct_points": eval_result.correct_points,
             "missing_points": eval_result.missing_points,
             "improvement_after_guidance": eval_result.improvement_after_guidance,
+            "reliable": eval_result.reliable,
             "can_contest": True,
         }
 
@@ -659,12 +759,14 @@ class SocraticTutor:
         attempt.contestation_text = argumentation.strip()
 
         contest_result = _re_evaluate_after_contestation(attempt, self._context_cache, self.model_name)
+        contest_result.final_motivation = add_citations(contest_result.final_motivation, self._source_cache)
+        contest_result.response_to_student = add_citations(contest_result.response_to_student, self._source_cache)
         attempt.contestation_result = contest_result
         attempt.state = TurnState.CONTESTED
 
         print(
             f"[ContestationAgent] {contest_result.contestation_assessment} | "
-            f"{attempt.evaluation.score} → {contest_result.final_score} | q_id={attempt.question_id}"
+            f"{attempt.evaluation.score} -> {contest_result.final_score} | q_id={attempt.question_id}"
         )
         return {
             "final_score": contest_result.final_score,
@@ -724,7 +826,7 @@ class DoubtTutor:
         self,
         student_id: int,
         exam_id: int,
-        model_name: str = DEFAULT_MODEL,
+        model_name: str | None = None,
         n_chunks: int = DEFAULT_N_CHUNKS,
     ):
         self.student_id = student_id
@@ -733,17 +835,19 @@ class DoubtTutor:
         self.n_chunks = n_chunks
         self.attempt: DoubtAttempt | None = None
         self._context_cache: list[str] = []
+        self._source_cache: list[dict] = []
 
     def start(self, doubt_text: str) -> dict:
         doubt_text = doubt_text.strip()
-        self._context_cache = retrieve_chunks(
+        self._source_cache = search_passages(
             query=doubt_text,
             student_id=self.student_id,
             exam_id=self.exam_id,
             n_results=self.n_chunks,
         )
+        self._context_cache = [passage["text"] for passage in self._source_cache]
         if not self._context_cache:
-            raise ValueError(
+            raise NoRelevantMaterialError(
                 "Non ho trovato materiale caricato pertinente a questo dubbio. "
                 "Carica un PDF sull'argomento o riformula la domanda."
             )
@@ -765,6 +869,7 @@ class DoubtTutor:
         attempt.student_answer = answer.strip()
 
         eval_result = _evaluate_doubt(attempt, self._context_cache, self.model_name)
+        eval_result.correct_answer = add_citations(eval_result.correct_answer, self._source_cache)
         attempt.evaluation = eval_result
         attempt.state = DoubtState.ANSWERED
 

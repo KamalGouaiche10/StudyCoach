@@ -1,7 +1,7 @@
 import importlib
 
 from backend.agents import groq_config
-from backend.agents import notes_generator, quiz_generator, socratic_tutor
+from backend.agents import model_router, notes_generator, quiz_generator, socratic_tutor
 
 
 def test_agents_share_groq_model_default():
@@ -31,12 +31,12 @@ def test_quiz_agent_initializes_groq_with_configured_model(monkeypatch):
         def __init__(self, **kwargs):
             captured["agent_kwargs"] = kwargs
 
-    monkeypatch.setattr(quiz_generator, "Groq", FakeGroq)
+    monkeypatch.setattr(model_router, "Groq", FakeGroq)
     monkeypatch.setattr(quiz_generator, "Agent", FakeAgent)
 
     quiz_generator._make_quiz_agent(quiz_generator.DEFAULT_MODEL)
 
-    assert captured["groq_kwargs"] == {"id": "openai/gpt-oss-120b"}
+    assert captured["groq_kwargs"] == {"id": "openai/gpt-oss-120b", "timeout": 30.0}
     assert captured["agent_kwargs"]["markdown"] is False
 
 

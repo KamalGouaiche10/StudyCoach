@@ -15,18 +15,26 @@ from backend.models.schemas import (
 
 
 def test_register_request_strips_username_whitespace():
-    req = RegisterRequest(username="  mario  ", password="secret123")
+    req = RegisterRequest(username="  mario  ", email=" Mario@Example.com ", password="secret123", password_confirm="secret123")
     assert req.username == "mario"
+    assert req.email == "mario@example.com"
 
 
 def test_register_request_rejects_short_username():
     with pytest.raises(ValidationError):
-        RegisterRequest(username="ab", password="secret123")
+        RegisterRequest(username="ab", email="mario@example.com", password="secret123", password_confirm="secret123")
 
 
 def test_register_request_rejects_short_password():
     with pytest.raises(ValidationError):
-        RegisterRequest(username="mario", password="123")
+        RegisterRequest(username="mario", email="mario@example.com", password="123", password_confirm="123")
+
+
+def test_register_request_rejects_invalid_email_and_mismatched_password():
+    with pytest.raises(ValidationError):
+        RegisterRequest(username="mario", email="invalid", password="secret123", password_confirm="secret123")
+    with pytest.raises(ValidationError):
+        RegisterRequest(username="mario", email="mario@example.com", password="secret123", password_confirm="different")
 
 
 def test_exam_create_strips_name():
